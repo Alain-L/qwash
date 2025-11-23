@@ -1,9 +1,12 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"log"
+	"qwash/analysis"
 	"qwash/db"
+	"qwash/output"
 
 	"github.com/spf13/cobra"
 )
@@ -168,7 +171,19 @@ func executeAnalysis(cmd *cobra.Command, args []string) {
 	switch {
 	case estimateFlag:
 		fmt.Println("[INFO] Running bloat estimation...")
-		fmt.Println("[TODO] Compute estimated bloat for tables and indexes")
+
+		// Analyze table bloat
+		tableBloat, err := analysis.DetectTableBloat(context.Background(), connection)
+		if err != nil {
+			log.Fatalf("[ERROR] Failed to analyze table bloat: %v", err)
+		}
+
+		// Display results based on output format
+		if jsonFlag {
+			output.PrintBloatJSON(tableBloat, nil)
+		} else {
+			output.PrintBloatSummary(tableBloat, nil)
+		}
 		return
 
 	case debloatFlag:
