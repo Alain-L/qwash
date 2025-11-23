@@ -48,6 +48,9 @@ temp/
 # Project-specific scripts
 _archi.sh
 
+# Reverse engineering / reference implementations
+retroengineering/
+
 # Log files
 *.log
 
