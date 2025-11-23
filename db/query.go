@@ -158,15 +158,16 @@ func (db *DB) CompactTable(tableName string, bloatPages int) error {
 		return fmt.Errorf("invalid targetPages: must be > 0")
 	}
 
-	// pageCount :=
-
-	iterations := int(math.Ceil(float64(bloatPages) / 2.0))
-	// iterations := int(math.Ceil(float64(bloatPages) / 4.0))
-	// iterations := int(math.Ceil(float64(bloatPages) / 16.0))
-
 	ctx := context.Background()
 
-	fmt.Printf("\n🔁 %d iterations needed \n", iterations)
+	// Configuration aligned with pgcompacttable for optimal performance
+	const pagesPerRound = 5          // Process 5 pages per iteration (vs 2 previously)
+	const vacuumEveryNPages = 250    // VACUUM every 250 pages (vs every round)
+
+	iterations := int(math.Ceil(float64(bloatPages) / float64(pagesPerRound)))
+	pagesProcessed := 0
+
+	fmt.Printf("\n🔁 %d iterations needed (processing %d pages/round)\n", iterations, pagesPerRound)
 	fmt.Printf("🚀 Starting compaction for table '%s'\n", tableName)
 	fmt.Println("📊 Running initial VACUUM ANALYZE...")
 
@@ -177,26 +178,26 @@ func (db *DB) CompactTable(tableName string, bloatPages int) error {
 	fmt.Println("✅ Initial VACUUM ANALYZE complete.")
 
 	for i := 0; i < iterations; i++ {
-		//fmt.Printf("\n🔁 Qwash iteration %d/%d\n", i+1, iterations)
-
-		if err := db.RunQwash(tableName, 2); err != nil {
+		if err := db.RunQwash(tableName, pagesPerRound); err != nil {
 			return fmt.Errorf("RunQwash failed at iteration %d: %w", i+1, err)
 		}
-		//fmt.Printf("✅ RunQwash round %d complete.\n", i+1)
 
-		//fmt.Println("📊 Running VACUUM...")
-		_, err := db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s;", pgx.Identifier{tableName}.Sanitize()))
-		if err != nil {
-			return fmt.Errorf("VACUUM failed at iteration %d: %w", i+1, err)
-		}
-		//fmt.Printf("✅ VACUUM round %d complete.\n", i+1)
+		pagesProcessed += pagesPerRound
 
-		//fmt.Println("📊 Running ANALYZE...")
-		_, err = db.conn.Exec(ctx, fmt.Sprintf("ANALYZE %s;", pgx.Identifier{tableName}.Sanitize()))
-		if err != nil {
-			return fmt.Errorf("ANALYZE failed at iteration %d: %w", i+1, err)
+		// VACUUM/ANALYZE only every N pages (like pgcompacttable)
+		if pagesProcessed >= vacuumEveryNPages || i == iterations-1 {
+			_, err := db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s;", pgx.Identifier{tableName}.Sanitize()))
+			if err != nil {
+				return fmt.Errorf("VACUUM failed at iteration %d: %w", i+1, err)
+			}
+
+			_, err = db.conn.Exec(ctx, fmt.Sprintf("ANALYZE %s;", pgx.Identifier{tableName}.Sanitize()))
+			if err != nil {
+				return fmt.Errorf("ANALYZE failed at iteration %d: %w", i+1, err)
+			}
+
+			pagesProcessed = 0 // Reset counter
 		}
-		//fmt.Printf("✅ ANALYZE round %d complete.\n", i+1)
 	}
 
 	// 🔍 Affichage des deux plus grands ctids à la fin
