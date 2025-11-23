@@ -45,6 +45,9 @@ tmp/
 temp/
 *.tmp
 
+# Project-specific scripts
+_archi.sh
+
 # Log files
 *.log
 
