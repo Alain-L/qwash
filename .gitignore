@@ -51,6 +51,11 @@ _archi.sh
 # Reverse engineering / reference implementations
 retroengineering/
 
+# Third-party SQL queries
+sql/*ioguix.sql
+sql/_*.sql
+
+
 # Log files
 *.log
 

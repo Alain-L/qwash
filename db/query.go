@@ -1,6 +1,7 @@
 package db
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"math"
@@ -66,11 +67,16 @@ func (db *DB) ListTables() ([]string, error) {
 	return databases, nil
 }
 
-// Core of Qwash
-// Core of Qwash
+// RunQwash is the core debloat operation using embedded SQL templates
 func (db *DB) RunQwash(tableName string, pageCount int) error {
 	if pageCount <= 0 {
 		return fmt.Errorf("invalid pageCount: must be > 0")
+	}
+
+	// Load query templates
+	queries, err := sql.NewDebloatQueries()
+	if err != nil {
+		return fmt.Errorf("failed to load query templates: %w", err)
 	}
 
 	ctx := context.Background()
@@ -87,15 +93,17 @@ func (db *DB) RunQwash(tableName string, pageCount int) error {
 		}
 	}()
 
-	// Step 1: Get the top `pageCount` ctids (based on tuple ID integer)
-	query := fmt.Sprintf(`
-		SELECT ltrim(split_part(ctid::text, ',', 1), '(')::int AS page
-		FROM %s
-		GROUP BY page
-		ORDER BY page DESC
-		LIMIT %d`, tableName, pageCount)
+	// Step 1: Get the top `pageCount` pages
+	var query bytes.Buffer
+	err = queries.SelectHighestPages.Execute(&query, map[string]interface{}{
+		"TableName": tableName,
+		"PageCount": pageCount,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to render select_highest_pages template: %w", err)
+	}
 
-	rows, err := tx.Query(ctx, query)
+	rows, err := tx.Query(ctx, query.String())
 	if err != nil {
 		return fmt.Errorf("failed to fetch ctids: %w", err)
 	}
@@ -116,8 +124,6 @@ func (db *DB) RunQwash(tableName string, pageCount int) error {
 		return fmt.Errorf("not enough rows to perform qwash: needed %d, got %d", pageCount, len(ctids))
 	}
 
-	// fmt.Printf("📦 Selected pages: %v\n", ctids)
-
 	// Build placeholder string like ($1, $2, ..., $N)
 	placeholders := make([]string, pageCount)
 	args := make([]interface{}, pageCount)
@@ -128,25 +134,43 @@ func (db *DB) RunQwash(tableName string, pageCount int) error {
 	inClause := strings.Join(placeholders, ", ")
 
 	// Step 2: Create a temporary table
-	tempTableSQL := fmt.Sprintf(`
-		CREATE TEMPORARY TABLE qwash ON COMMIT DROP AS
-		SELECT * FROM %[1]s
-		WHERE ltrim(split_part(ctid::text, ',', 1), '(')::int IN (%s)`, tableName, inClause)
-	if _, err := tx.Exec(ctx, tempTableSQL, args...); err != nil {
+	query.Reset()
+	err = queries.CreateTempTable.Execute(&query, map[string]interface{}{
+		"TableName": tableName,
+		"InClause":  inClause,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to render create_temp_table template: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, query.String(), args...); err != nil {
 		return fmt.Errorf("failed to create temporary table: %w", err)
 	}
 
 	// Step 3: Delete from original table
-	deleteSQL := fmt.Sprintf(`
-		DELETE FROM %[1]s
-		WHERE ltrim(split_part(ctid::text, ',', 1), '(')::int IN (%s)`, tableName, inClause)
-	if _, err := tx.Exec(ctx, deleteSQL, args...); err != nil {
+	query.Reset()
+	err = queries.DeleteFromTable.Execute(&query, map[string]interface{}{
+		"TableName": tableName,
+		"InClause":  inClause,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to render delete_from_table template: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, query.String(), args...); err != nil {
 		return fmt.Errorf("failed to delete rows: %w", err)
 	}
 
 	// Step 4: Reinsert from temp
-	insertSQL := fmt.Sprintf(`INSERT INTO %[1]s SELECT * FROM qwash`, tableName)
-	if _, err := tx.Exec(ctx, insertSQL); err != nil {
+	query.Reset()
+	err = queries.ReinsertFromTemp.Execute(&query, map[string]interface{}{
+		"TableName": tableName,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to render reinsert_from_temp template: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, query.String()); err != nil {
 		return fmt.Errorf("failed to insert rows back: %w", err)
 	}
 
