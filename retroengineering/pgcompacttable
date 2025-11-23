@@ -1,0 +1,221 @@
+#!/opt/homebrew/bin/perl
+
+use strict;
+use warnings;
+
+use Pod::Usage;
+
+use Time::HiRes qw/time sleep/;
+use POSIX;
+use List::Util qw/sum/;
+use Getopt::Long qw/:config no_ignore_case/;
+use DBI;
+
+use Data::Dumper;
+
+our $VERSION = '1.0.14';
+
+local $| = 1;
+select(STDOUT);
+
+our $_log = select();
+our $_log_level;
+our $_dbh;
+our $_after_round_statement;
+my $_dbh_server_version;
+
+use constant MINIMAL_COMPACT_PAGES => 10;
+use constant MINIMAL_COMPACT_PERCENT => 20;
+use constant PAGES_PER_ROUND_DIVISOR => 1000;
+use constant MAX_PAGES_PER_ROUND => 5;
+use constant PAGES_BEFORE_VACUUM_LOWER_DIVISOR => 16;
+use constant PAGES_BEFORE_VACUUM_LOWER_THRESHOLD => 1000;
+use constant PAGES_BEFORE_VACUUM_UPPER_DIVISOR => 50;
+use constant PROGRESS_REPORT_PERIOD => 60;
+use constant LOG_ALWAYS => 1000;
+use constant LOG_ERROR => 2;
+use constant LOG_WARNING => 1;
+use constant LOG_NOTICE => 0;
+
+# Settings & defaults
+
+my $show_version;
+my $show_help;
+my $show_man;
+
+# use libpq defaults
+my $db_host = NULL;
+my $db_port = NULL;
+
+my $db_user = $ENV{LOGNAME} || $ENV{USER} || getpwuid($<);
+my $db_passwd = '';
+
+my $db_name = $ENV{LOGNAME} || $ENV{USER} || getpwuid($<);
+my $schema_name = 'public';
+my $table_name;
+my $table_names_like;
+my $table_size_min = 0;
+my $table_size_max = 0;
+
+my $verbose;
+my $quiet;
+
+my $force;
+my $delay_ratio = 2;
+my $after_round_query;
+my $routine_vacuum;
+my $no_reindex;
+my $print_reindex_queries = 0;
+my $max_retry_count = 10;
+my $reindex_replace = 0;
+my $reindex_retry_max_count = 100;
+my $reindex_retry_pause = 1;
+my $reindex_lock_timeout = 1000;
+
+my $all_db;
+
+my $only_schema;
+my $exclude_schema;
+my $exclude_table;
+my %only_schemas;
+my %excluded_schemas;
+my %excluded_tables;
+
+my $initial_reindex;
+my $no_initial_vacuum;
+
+my %table_info;
+
+unless (GetOptions(
+            #help & man
+            'V|version' => \$show_version,
+            'help|?' => \$show_help,
+            'm|man' => \$show_man,
+            #database connection parameters
+            'h|host=s' => \$db_host,
+            'p|port=i' => \$db_port,
+            'U|user=s' => \$db_user,
+            'W|password=s' => \$db_passwd,
+            'd|dbname=s' => \$db_name,
+            'n|schema=s' => \$only_schema,
+            't|table=s' => \$table_name,
+            'tables-like=s' => \$table_names_like,
+            'min-table-size=i' => \$table_size_min,
+            'max-table-size=i' => \$table_size_max,
+            'v|verbose' => \$verbose,
+            'q|quiet' => \$quiet,
+            'f|force' => \$force,
+            'r|no-reindex' => \$no_reindex,
+            'no-initial-vacuum' => \$no_initial_vacuum,
+            'reindex-replace' => \$reindex_replace,
+            'reindex-retry-count=i' => \$reindex_retry_max_count,
+            'reindex-retry-pause=i' => \$reindex_retry_pause,
+            'reindex-lock-timeout=i' => \$reindex_lock_timeout,
+            's|print-reindex-queries' => \$print_reindex_queries,
+            'o|max-retry-count=i' => \$max_retry_count,
+            'E|delay-ratio=i' => \$delay_ratio,
+            'Q|after-round-query=s' => \$after_round_query,
+            'R|routine-vacuum' => \$routine_vacuum,
+            'a|all' => \$all_db,
+            'N|exclude-schema=s' => \$exclude_schema,
+            'T|exclude-table=s' => \$exclude_table,
+            'i|initial-reindex' => \$initial_reindex
+          )) {
+ show_usage();
+ exit(0);
+}
+
+my $_verbosity = ($verbose ? LOG_NOTICE : ($quiet ? LOG_ERROR : LOG_WARNING));
+
+our $_current_db_name;
+our $_current_schema_name;
+our $_current_table_name;
+
+sub not_enough_arguments {
+  logger(LOG_ALWAYS, "%s: At least one of the options must be specified: all, dbname", $0);
+  logger('quit', "Use --help for short help, --man for full manual.");
+}
+
+sub no_together_arguments {
+  logger(LOG_ALWAYS, "%s: These options cannot be specified together at once: %s", $0, join(', ', @_));
+  logger('quit', "Use --help for short help, --man for full manual.");
+}
+
+sub show_version {
+  logger(LOG_ALWAYS, "%s v%s", $0, $VERSION);
+}
+sub show_help {
+  pod2usage(
+    -message => "",
+    -verbose => 99,
+    -exitval => 1,
+    -sections => 'NAME|SYNOPSIS|EXAMPLES',
+  ); 
+}
+
+sub show_usage {
+  pod2usage(
+    -message => "",
+    -verbose => 99,
+    -exitval => 1,
+    -sections => 'SYNOPSIS',
+  );
+}
+
+sub show_man {
+  pod2usage(
+    -message => "",
+    -verbose => 99,
+    -exitval => 1,
+    -sections => '|NAME|SYNOPSIS|DESCRIPTION|OPTIONS|LICENSE AND COPYRIGHT|VERSION|AUTHOR'
+  );
+}
+
+
+sub set_current_db_name {
+  $_current_db_name = shift;
+}
+
+sub set_current_schema_name_table_name {
+  $_current_schema_name = shift;
+  $_current_table_name = shift;
+}
+
+sub unset_current_db_name {
+  undef $_current_db_name;
+}
+
+sub unset_current_schema_name_table_name {
+  undef $_current_schema_name;
+  undef $_current_table_name;
+}
+
+sub unset_after_round_statement {
+  undef $_after_round_statement;
+}
+
+sub logger {
+  my $level = shift;
+  my $message = shift;
+  my @message_args = @_;
+  $level = LOG_WARNING unless ($level =~ /^\d+$/);
+  return if ($level < $_verbosity);
+  no strict;
+  print $_log sprintf("%s%s$message\n", ($level == LOG_ALWAYS ? '' : sprintf("[%s] ", scalar(localtime))), ($_current_db_name ? sprintf("(%s%s) ", $_current_db_name, ($_current_schema_name && $_current_table_name) ? ":$_current_schema_name.$_current_table_name" : "") : ""), @message_args);
+  use strict;
+}
+
+sub nice_size
+{
+  my $size = shift;
+  $size = 0 unless ($size);
+  my @sizes = qw/B KB MB GB TB PB/;
+
+  my $i = 0;
+
+  while (abs($size) > 1024) {
+    $size = $size / 1024;
+    $i++;
+  }
+  return sprintf("%.3f$sizes[$i]", $size);
+}
