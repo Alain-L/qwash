@@ -5,6 +5,10 @@ bin/
 *.so
 *.dylib
 
+# Exception: keep pgcompacttable reference binaries for benchmarking
+!pgcompacttable
+!retroengineering/pgcompacttable
+
 # Test binaries
 *.test
 
