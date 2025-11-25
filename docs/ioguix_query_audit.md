@@ -128,12 +128,12 @@ Les deux approches donnent des résultats **très similaires** avec une différe
 
 ### Table: `high_bloat_table_1000x`
 
-| Métrique | ioguix | qwash | Différence |
-|----------|--------|-------|------------|
-| Real size | 116,252,672 | 116,252,672 | 0 bytes |
-| Bloat size | 84,836,352 | 82,509,824 | 2,326,528 (2.7%) |
-| Bloat % | 72.98% | 70.97% | -2.01% |
-| is_na | false | N/A | - |
+| Métrique   | ioguix      | qwash       | Différence       |
+| ---------- | ----------- | ----------- | ---------------- |
+| Real size  | 116,252,672 | 116,252,672 | 0 bytes          |
+| Bloat size | 84,836,352  | 82,509,824  | 2,326,528 (2.7%) |
+| Bloat %    | 72.98%      | 70.97%      | -2.01%           |
+| is_na      | false       | N/A         | -                |
 
 **Analyse**:
 - Différence de 2.3 MB sur 84 MB = **2.7% d'écart**
@@ -144,10 +144,10 @@ Les deux approches donnent des résultats **très similaires** avec une différe
 
 Table `high_bloat_table_10x_fill80` (fillfactor=80):
 
-| Métrique | ioguix | qwash |
-|----------|--------|-------|
-| Bloat % | 72.29% | 69.88% |
-| Fillfactor détecté | 80 | 80 |
+| Métrique           | ioguix | qwash  |
+| ------------------ | ------ | ------ |
+| Bloat %            | 72.29% | 69.88% |
+| Fillfactor détecté | 80     | 80     |
 
 ✅ Les deux détectent correctement le fillfactor et l'utilisent dans le calcul.
 

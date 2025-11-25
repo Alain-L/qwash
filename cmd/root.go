@@ -190,9 +190,20 @@ func executeAnalysis(cmd *cobra.Command, args []string) {
 		fmt.Println("[WARNING] Bloat reduction is an experimental feature. Use with caution.")
 		fmt.Println("[INFO] Running bloat reduction process...")
 
+		// If no tables specified, get all tables from the database
 		if len(targetTables) == 0 {
-			fmt.Println("[ERROR] No target tables specified. Use -t to define tables.")
-			return
+			fmt.Println("[INFO] No tables specified, debloating all tables in database...")
+			tables, err := connection.ListTables()
+			if err != nil {
+				fmt.Printf("[ERROR] Failed to list tables: %v\n", err)
+				return
+			}
+			targetTables = tables
+			if len(targetTables) == 0 {
+				fmt.Println("[INFO] No tables found in database.")
+				return
+			}
+			fmt.Printf("[INFO] Found %d tables to debloat\n", len(targetTables))
 		}
 
 		for _, table := range targetTables {
@@ -202,8 +213,11 @@ func executeAnalysis(cmd *cobra.Command, args []string) {
 				fmt.Printf("[ERROR] Failed to estimate bloat on %s: %v\n", table, err)
 				continue
 			}
-			if err := connection.CompactTable(table, bloatPages); err != nil {
-				fmt.Printf("[ERROR] Failed to debloat table %s: %v\n", table, err)
+
+			// Compact the table using the proven algorithm
+			compactErr := connection.CompactTable(table, bloatPages)
+			if compactErr != nil {
+				fmt.Printf("[ERROR] Failed to debloat table %s: %v\n", table, compactErr)
 			} else {
 				fmt.Printf("[INFO] Debloat completed for table: %s\n", table)
 			}
