@@ -396,7 +396,7 @@ func (db *DB) CompactTable(tableName string, initialBloatPages int) error {
 		pagesRemaining := bloatPages
 		roundNumber := 0
 		roundsSinceLastVacuum := 0
-		const vacuumThreshold = 1 // Optimal: VACUUM every round enables perfect page truncation
+		const vacuumThreshold = 1 // VACUUM every round for 100% precision
 
 		for pagesRemaining > 0 {
 			// Calculate pages to process this round (degressive, adaptive to total bloat)
@@ -463,8 +463,7 @@ func (db *DB) CompactTable(tableName string, initialBloatPages int) error {
 			fmt.Printf("⏳ Pass %d, Round %d: processed %d pages (%.1f%% of pass done, %d pages remaining)\n",
 				passNumber, roundNumber, pagesThisRound, percentDone, pagesRemaining)
 
-			// Conditional VACUUM: only every N rounds to avoid over-vacuumization
-			// Inspired by pgcompacttable's adaptive vacuum strategy
+			// Conditional VACUUM: every round for 100% precision
 			if roundsSinceLastVacuum >= vacuumThreshold || pagesRemaining == 0 {
 				fmt.Printf("🧹 Running VACUUM after %d rounds...\n", roundsSinceLastVacuum)
 				_, err := db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s;", pgx.Identifier{tableName}.Sanitize()))
