@@ -12,7 +12,9 @@ import (
 
 // DetectTableBloat analyzes table bloat in PostgreSQL using the embedded bloat query.
 func DetectTableBloat(ctx context.Context, dbConn *db.DB) ([]BloatTable, error) {
-	log.Println("[INFO] Analyzing table bloat...")
+	if dbConn.Verbose {
+		log.Println("[INFO] Analyzing table bloat...")
+	}
 
 	rows, err := dbConn.Query(ctx, sql.TableBloatSQL)
 	if err != nil {
@@ -30,10 +32,10 @@ func DetectTableBloat(ctx context.Context, dbConn *db.DB) ([]BloatTable, error) 
 			minPages        int
 			actualPages     int
 			fillfactor      int
-			relationSize    string // pg_size_pretty output
+			relationSize    string   // pg_size_pretty output
 			toastSize       string
 			bloatSizeStr    string
-			bloatPct        float64
+			bloatPct        *float64 // nullable
 		)
 
 		err := rows.Scan(
@@ -67,18 +69,26 @@ func DetectTableBloat(ctx context.Context, dbConn *db.DB) ([]BloatTable, error) 
 		bloatSize := parseSizeToBytes(bloatSizeStr)
 		tableSize := parseSizeToBytes(relationSize)
 
+		// Handle NULL bloatPct
+		var bloatRatio float64
+		if bloatPct != nil {
+			bloatRatio = *bloatPct
+		}
+
 		tbl := BloatTable{
 			Schema:     schema,
 			TableName:  table,
 			TableSize:  tableSize,
 			BloatSize:  bloatSize,
-			BloatRatio: bloatPct,
+			BloatRatio: bloatRatio,
 		}
 
 		bloatTables = append(bloatTables, tbl)
 	}
 
-	log.Printf("[INFO] Found %d tables with bloat information.\n", len(bloatTables))
+	if dbConn.Verbose {
+		log.Printf("[INFO] Found %d tables with bloat information.\n", len(bloatTables))
+	}
 	return bloatTables, nil
 }
 

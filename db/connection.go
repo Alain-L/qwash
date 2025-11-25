@@ -21,11 +21,12 @@ type Config struct {
 
 // DB represents a database connection
 type DB struct {
-	conn *pgx.Conn
+	conn    *pgx.Conn
+	Verbose bool
 }
 
 // Connect establishes a connection to PostgreSQL and returns a DB struct
-func Connect(cfg Config) (*DB, error) {
+func Connect(cfg Config, verbose bool) (*DB, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -38,14 +39,19 @@ func Connect(cfg Config) (*DB, error) {
 		return nil, err
 	}
 
-	log.Printf("[INFO] Successfully connected to %s at %s:%s", cfg.Database, cfg.Host, cfg.Port)
-	return &DB{conn: conn}, nil
+	if verbose {
+		log.Printf("[INFO] Successfully connected to %s at %s:%s", cfg.Database, cfg.Host, cfg.Port)
+	}
+
+	return &DB{conn: conn, Verbose: verbose}, nil
 }
 
 // Close properly closes the database connection
 func (db *DB) Close() {
 	if db.conn != nil {
 		db.conn.Close(context.Background())
-		log.Println("[INFO] Database connection closed.")
+		if db.Verbose {
+			log.Println("[INFO] Database connection closed.")
+		}
 	}
 }

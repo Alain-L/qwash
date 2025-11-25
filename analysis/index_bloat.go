@@ -10,7 +10,9 @@ import (
 
 // DetectBtreeIndexBloat analyzes B-Tree indexes for bloat.
 func DetectBtreeIndexBloat(ctx context.Context, dbConn *db.DB) ([]BloatIndex, error) {
-	log.Println("[INFO] Analyzing B-Tree index bloat...")
+	if dbConn.Verbose {
+		log.Println("[INFO] Analyzing B-Tree index bloat...")
+	}
 
 	// Placeholder query (to be replaced with a real PostgreSQL index bloat query)
 	query := `
@@ -40,6 +42,8 @@ func DetectBtreeIndexBloat(ctx context.Context, dbConn *db.DB) ([]BloatIndex, er
 		bloatIndexes = append(bloatIndexes, idx)
 	}
 
-	log.Printf("[INFO] Found %d potentially bloated indexes.\n", len(bloatIndexes))
+	if dbConn.Verbose {
+		log.Printf("[INFO] Found %d potentially bloated indexes.\n", len(bloatIndexes))
+	}
 	return bloatIndexes, nil
 }

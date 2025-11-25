@@ -2,11 +2,13 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"qwash/analysis"
 	"qwash/db"
 	"qwash/output"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -19,15 +21,26 @@ var (
 	host         []string // --host
 	port         []string // --port
 	pass         string   // --password
-	sslMode      string   // --sslMode
+	sslMode      string   // --sslmode
 	testConnFlag bool     // --test-connection
 
+	// Targeting options
+	targetTables  []string // --table (-t)
+	targetSchemas []string // --schema (-n)
+	excludeTbl    []string // --exclude-table
+	systemFlag    bool     // --system (-S) include system tables
+
 	// Analysis options
-	estimateFlag bool     // --estimate
-	detailFlag   bool     // --detail
-	debloatFlag  bool     // --debloat
-	excludeTbl   []string // --exclude-table
-	targetTables []string // --table (-t)
+	estimateFlag bool // --estimate (-E)
+	detailFlag   bool // --detail (-D)
+
+	// Debloat options
+	debloatFlag bool // --debloat (-B)
+	fastFlag    bool // --fast
+	slowFlag    bool // --slow (1 page at a time with delay, like pgcompacttable)
+	delayMs     int  // --delay (milliseconds between operations in slow mode)
+	dryRunFlag  bool // --dry-run
+	reindexFlag bool // --reindex
 
 	// Output options
 	verboseFlag bool // --verbose
@@ -63,24 +76,42 @@ func init() {
 		"Database port(s) (default: 5432)")
 	rootCmd.PersistentFlags().StringVarP(&pass, "password", "W", "",
 		"Database password (optional)")
-	rootCmd.PersistentFlags().StringVarP(&sslMode, "sslmode", "S", "disable",
+	rootCmd.PersistentFlags().StringVar(&sslMode, "sslmode", "disable",
 		"SSL mode (disable, require, verify-ca, verify-full)")
 
 	// Database testing
 	rootCmd.PersistentFlags().BoolVarP(&testConnFlag, "test-connection", "T", false,
 		"Test the database connection and exit")
 
+	// Targeting options
+	rootCmd.PersistentFlags().StringSliceVarP(&targetTables, "table", "t", nil,
+		"Target specific table(s) (can be repeated)")
+	rootCmd.PersistentFlags().StringSliceVarP(&targetSchemas, "schema", "n", nil,
+		"Target specific schema(s) (can be repeated)")
+	rootCmd.PersistentFlags().StringSliceVarP(&excludeTbl, "exclude-table", "X", nil,
+		"Exclude specific tables from analysis")
+	rootCmd.PersistentFlags().BoolVarP(&systemFlag, "system", "S", false,
+		"Include system tables (pg_catalog, information_schema)")
+
 	// Analysis options
 	rootCmd.PersistentFlags().BoolVarP(&estimateFlag, "estimate", "E", false,
-		"Display a report of estimated bloat (default)")
+		"Display a report of estimated bloat")
 	rootCmd.PersistentFlags().BoolVarP(&detailFlag, "detail", "D", false,
 		"Show detailed bloat analysis per table and index")
+
+	// Debloat options
 	rootCmd.PersistentFlags().BoolVarP(&debloatFlag, "debloat", "B", false,
-		"Perform bloat reduction on identified tables (cautiously)")
-	rootCmd.PersistentFlags().StringSliceVarP(&excludeTbl, "exclude-table", "X", nil,
-		"Exclude specific tables from analysis and bloat removal")
-	rootCmd.PersistentFlags().StringSliceVarP(&targetTables, "table", "t", nil,
-		"Specify table(s) to debloat (can be used multiple times)")
+		"Perform bloat reduction on tables")
+	rootCmd.PersistentFlags().BoolVar(&fastFlag, "fast", false,
+		"Fast mode: ~97%% efficiency, significantly faster")
+	rootCmd.PersistentFlags().BoolVar(&slowFlag, "slow", false,
+		"Slow mode: 1 page at a time with delay (like pgcompacttable)")
+	rootCmd.PersistentFlags().IntVar(&delayMs, "delay", 10,
+		"Delay in milliseconds between operations in slow mode (default: 10)")
+	rootCmd.PersistentFlags().BoolVar(&dryRunFlag, "dry-run", false,
+		"Show what would be done without making changes")
+	rootCmd.PersistentFlags().BoolVar(&reindexFlag, "reindex", false,
+		"Rebuild indexes after debloat (REINDEX CONCURRENTLY)")
 
 	// Output options
 	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false,
@@ -91,8 +122,6 @@ func init() {
 
 // executeAnalysis is the core function that orchestrates the pipeline
 func executeAnalysis(cmd *cobra.Command, args []string) {
-	fmt.Println("[INFO] Starting qwash analysis...")
-
 	// Build connection config
 	dbConfig := db.Config{
 		Host:     getFirstOrDefault(host, "localhost"),
@@ -103,135 +132,93 @@ func executeAnalysis(cmd *cobra.Command, args []string) {
 		SSLMode:  sslMode,
 	}
 
-	// Step 1: Validate conflicting flags
+	// Step 1: Validate flag combinations
 	if estimateFlag && debloatFlag {
 		log.Fatalf("[ERROR] --estimate (-E) and --debloat (-B) cannot be used together.")
 	}
 
-	// Step 2: Display connection settings (if provided)
-	if len(dbName) > 0 {
-		fmt.Printf("[INFO] Target databases: %v\n", dbName)
-	} else {
-		fmt.Println("[INFO] No specific database provided, using default connection settings.")
+	// --reindex requires --debloat
+	if reindexFlag && !debloatFlag {
+		log.Fatalf("[ERROR] --reindex requires --debloat (-B).")
 	}
 
-	if len(user) > 0 {
-		fmt.Printf("[INFO] Connecting as user: %v\n", user)
+	// --fast, --slow, --dry-run require --debloat
+	if (fastFlag || slowFlag || dryRunFlag) && !debloatFlag {
+		log.Fatalf("[ERROR] --fast, --slow, and --dry-run require --debloat (-B).")
 	}
 
-	if len(host) > 0 {
-		fmt.Printf("[INFO] Database host: %v\n", host)
-	} else {
-		fmt.Println("[INFO] Using default host: localhost")
+	// --fast and --slow are mutually exclusive
+	if fastFlag && slowFlag {
+		log.Fatalf("[ERROR] --fast and --slow cannot be used together.")
 	}
 
-	if len(port) > 0 {
-		fmt.Printf("[INFO] Database port: %v\n", port)
-	} else {
-		fmt.Println("[INFO] Using default port: 5432")
+	// --delay requires --slow
+	if cmd.Flags().Changed("delay") && !slowFlag {
+		log.Fatalf("[ERROR] --delay can only be used with --slow mode.")
 	}
 
-	// Step 3: Test database connection if requested
+	// Validate --delay value
+	if delayMs < 0 {
+		log.Fatalf("[ERROR] --delay must be >= 0 (got %d).", delayMs)
+	}
+	if delayMs > 10000 {
+		log.Fatalf("[ERROR] --delay must be <= 10000ms (got %d). Use lower values for reasonable performance.", delayMs)
+	}
+
+	// Require at least one mode
+	if !estimateFlag && !debloatFlag && !testConnFlag && !detailFlag {
+		// Default to --estimate if no mode specified
+		estimateFlag = true
+	}
+
+	// Step 2: Test database connection if requested
 	if testConnFlag {
-		fmt.Println("[INFO] Testing database connection...")
-		connection, err := db.Connect(dbConfig)
+		if verboseFlag {
+			fmt.Printf("Connecting to %s@%s:%s/%s...\n",
+				dbConfig.User, dbConfig.Host, dbConfig.Port, dbConfig.Database)
+		}
+		connection, err := db.Connect(dbConfig, verboseFlag)
 		if err != nil {
-			fmt.Println("[ERROR] Connection test failed:", err)
-			return
+			log.Fatalf("Connection failed: %v", err)
 		}
 		defer connection.Close()
 
-		fmt.Println("[SUCCESS] Connection test passed!")
-
-		// Retrieve available databases
-		databases, err1 := connection.ListDatabases()
-		if err1 != nil {
-			fmt.Println("[ERROR] Failed to retrieve databases:", err1)
-		} else {
-			fmt.Println("[INFO] Available databases:")
+		fmt.Println("Connection OK")
+		databases, err := connection.ListDatabases()
+		if err == nil {
+			fmt.Println("Available databases:")
 			for _, db := range databases {
-				fmt.Printf("    - %s\n", db)
+				fmt.Printf("  - %s\n", db)
 			}
 		}
 		return
 	}
 
-	// Step 4: Establish database connection
-	connection, err := db.Connect(dbConfig)
+	// Step 3: Establish database connection
+	connection, err := db.Connect(dbConfig, verboseFlag)
 	if err != nil {
-		log.Fatalf("[ERROR] Failed to connect to database: %v", err)
+		log.Fatalf("Failed to connect: %v", err)
 	}
 	defer connection.Close()
 
-	if len(excludeTbl) > 0 {
-		fmt.Printf("[INFO] Excluding tables from analysis: %v\n", excludeTbl)
-	}
-
-	// Step 5: Determine operation mode
+	// Step 4: Determine operation mode
 	switch {
 	case estimateFlag:
-		fmt.Println("[INFO] Running bloat estimation...")
-
-		// Analyze table bloat
-		tableBloat, err := analysis.DetectTableBloat(context.Background(), connection)
-		if err != nil {
-			log.Fatalf("[ERROR] Failed to analyze table bloat: %v", err)
-		}
-
-		// Display results based on output format
-		if jsonFlag {
-			output.PrintBloatJSON(tableBloat, nil)
-		} else {
-			output.PrintBloatSummary(tableBloat, nil)
-		}
+		runEstimate(connection)
 		return
 
 	case debloatFlag:
-		fmt.Println("[WARNING] Bloat reduction is an experimental feature. Use with caution.")
-		fmt.Println("[INFO] Running bloat reduction process...")
-
-		// If no tables specified, get all tables from the database
-		if len(targetTables) == 0 {
-			fmt.Println("[INFO] No tables specified, debloating all tables in database...")
-			tables, err := connection.ListTables()
-			if err != nil {
-				fmt.Printf("[ERROR] Failed to list tables: %v\n", err)
-				return
-			}
-			targetTables = tables
-			if len(targetTables) == 0 {
-				fmt.Println("[INFO] No tables found in database.")
-				return
-			}
-			fmt.Printf("[INFO] Found %d tables to debloat\n", len(targetTables))
-		}
-
-		for _, table := range targetTables {
-			fmt.Printf("[INFO] Compacting table: %s\n", table)
-			bloatPages, err := connection.GetBloatPages(table)
-			if err != nil {
-				fmt.Printf("[ERROR] Failed to estimate bloat on %s: %v\n", table, err)
-				continue
-			}
-
-			// Compact the table using the proven algorithm
-			compactErr := connection.CompactTable(table, bloatPages)
-			if compactErr != nil {
-				fmt.Printf("[ERROR] Failed to debloat table %s: %v\n", table, compactErr)
-			} else {
-				fmt.Printf("[INFO] Debloat completed for table: %s\n", table)
-			}
-		}
+		runDebloat(connection)
 		return
 
 	case detailFlag:
-		fmt.Println("[INFO] Displaying detailed bloat analysis per table and index...")
-		fmt.Println("[TODO] Show detailed per-table bloat statistics")
+		fmt.Println("[INFO] Detailed bloat analysis per table and index not yet implemented")
+		fmt.Println("       Use --estimate for bloat estimation or --debloat to reduce bloat")
 		return
 
 	default:
-		fmt.Println("[INFO] Displaying global bloat summary...")
-		fmt.Println("[TODO] Compute and display summary statistics on bloat")
+		fmt.Println("[INFO] Global bloat summary not yet implemented")
+		fmt.Println("       Use --estimate for bloat estimation or --debloat to reduce bloat")
 	}
 }
 
@@ -241,4 +228,245 @@ func getFirstOrDefault(arr []string, defaultValue string) string {
 		return arr[0]
 	}
 	return defaultValue
+}
+
+// runEstimate executes the bloat estimation report
+func runEstimate(connection *db.DB) {
+	if verboseFlag {
+		fmt.Println("Running bloat estimation...")
+		if len(targetSchemas) > 0 {
+			fmt.Printf("  Schemas: %v\n", targetSchemas)
+		}
+		if len(targetTables) > 0 {
+			fmt.Printf("  Tables: %v\n", targetTables)
+		}
+		if systemFlag {
+			fmt.Println("  Including system tables")
+		}
+	}
+
+	// Analyze table bloat
+	tableBloat, err := analysis.DetectTableBloat(context.Background(), connection)
+	if err != nil {
+		log.Fatalf("Failed to analyze table bloat: %v", err)
+	}
+
+	// Display results based on output format
+	if jsonFlag {
+		output.PrintBloatJSON(tableBloat, nil)
+	} else {
+		output.PrintBloatSummary(tableBloat, nil)
+	}
+}
+
+// runDebloat executes the bloat reduction process
+func runDebloat(connection *db.DB) {
+	// Warning for system tables
+	if systemFlag {
+		fmt.Println("WARNING: You are about to debloat system tables!")
+		fmt.Println("This can be dangerous and may affect database stability.")
+		fmt.Print("Are you sure you want to continue? [y/N]: ")
+
+		var response string
+		fmt.Scanln(&response)
+		if response != "y" && response != "Y" {
+			fmt.Println("Aborted.")
+			return
+		}
+	}
+
+	// Show mode
+	if dryRunFlag {
+		fmt.Println("DRY-RUN MODE: No changes will be made")
+	}
+	if fastFlag {
+		fmt.Println("FAST MODE: Using adaptive vacuum (~99% efficiency)")
+	}
+
+	// Get list of tables to process
+	tables, err := getTargetTables(connection)
+	if err != nil {
+		log.Fatalf("Failed to get target tables: %v", err)
+	}
+
+	if len(tables) == 0 {
+		fmt.Println("No tables to debloat.")
+		return
+	}
+
+	if verboseFlag || dryRunFlag {
+		fmt.Printf("Tables to process: %d\n", len(tables))
+		for _, t := range tables {
+			fmt.Printf("  - %s\n", t)
+		}
+	}
+
+	// Process each table
+	var results []debloatResult
+	for _, table := range tables {
+		result := processTable(connection, table)
+		results = append(results, result)
+	}
+
+	// Output results
+	if jsonFlag {
+		printDebloatJSON(results)
+	} else {
+		printDebloatSummary(results)
+	}
+}
+
+// debloatResult holds the result of debloating a single table
+type debloatResult struct {
+	Table        string        `json:"table"`
+	InitialPages int           `json:"initial_pages"`
+	FinalPages   int           `json:"final_pages"`
+	BloatRemoved int           `json:"bloat_removed"`
+	Duration     time.Duration `json:"duration_ms"`
+	Reindexed    bool          `json:"reindexed,omitempty"`
+	Error        string        `json:"error,omitempty"`
+	DryRun       bool          `json:"dry_run,omitempty"`
+}
+
+// getTargetTables returns the list of tables to debloat based on flags
+func getTargetTables(connection *db.DB) ([]string, error) {
+	// If specific tables are provided, use them
+	if len(targetTables) > 0 {
+		return targetTables, nil
+	}
+
+	// Otherwise, get all tables (filtered by schema if specified)
+	tables, err := connection.ListTablesFiltered(targetSchemas, systemFlag, excludeTbl)
+	if err != nil {
+		return nil, err
+	}
+
+	return tables, nil
+}
+
+// processTable debloats a single table and returns the result
+func processTable(connection *db.DB, table string) debloatResult {
+	startTime := time.Now()
+	result := debloatResult{Table: table, DryRun: dryRunFlag}
+
+	// Get initial bloat estimate
+	bloatPages, err := connection.GetBloatPages(table)
+	if err != nil {
+		result.Error = fmt.Sprintf("failed to estimate bloat: %v", err)
+		return result
+	}
+
+	if bloatPages <= 0 {
+		if verboseFlag {
+			fmt.Printf("  %s: no bloat detected, skipping\n", table)
+		}
+		return result
+	}
+
+	// Get initial page count
+	initialPages, err := connection.GetTablePages(table)
+	if err != nil {
+		result.Error = fmt.Sprintf("failed to get page count: %v", err)
+		return result
+	}
+	result.InitialPages = initialPages
+
+	if dryRunFlag {
+		// Dry-run: just show what would happen
+		fmt.Printf("  %s: would compact %d bloat pages (current: %d pages)\n",
+			table, bloatPages, initialPages)
+		if reindexFlag {
+			fmt.Printf("  %s: would reindex after compaction\n", table)
+		}
+		result.FinalPages = initialPages - bloatPages // estimated
+		result.BloatRemoved = bloatPages
+		return result
+	}
+
+	// Actually compact the table
+	fmt.Printf("  %s: compacting...\n", table)
+	var compactErr error
+	if fastFlag {
+		compactErr = connection.CompactTableFast(table, bloatPages)
+	} else if slowFlag {
+		compactErr = connection.CompactTableSlow(table, bloatPages, delayMs)
+	} else {
+		compactErr = connection.CompactTable(table, bloatPages)
+	}
+
+	if compactErr != nil {
+		result.Error = fmt.Sprintf("compaction failed: %v", compactErr)
+		return result
+	}
+
+	// Get final page count
+	finalPages, _ := connection.GetTablePages(table)
+	result.FinalPages = finalPages
+	result.BloatRemoved = initialPages - finalPages
+
+	// Reindex if requested
+	if reindexFlag {
+		fmt.Printf("  %s: reindexing...\n", table)
+		if err := connection.ReindexTable(table); err != nil {
+			result.Error = fmt.Sprintf("reindex failed: %v", err)
+		} else {
+			result.Reindexed = true
+		}
+	}
+
+	result.Duration = time.Since(startTime)
+	return result
+}
+
+// printDebloatSummary prints a text summary of debloat results
+func printDebloatSummary(results []debloatResult) {
+	fmt.Println()
+	fmt.Println("Debloat Summary:")
+	fmt.Println("================")
+
+	var totalRemoved int
+	var totalDuration time.Duration
+	var errors int
+
+	for _, r := range results {
+		totalDuration += r.Duration
+		if r.Error != "" {
+			fmt.Printf("  %s: ERROR - %s\n", r.Table, r.Error)
+			errors++
+		} else if r.BloatRemoved > 0 {
+			fmt.Printf("  %s: %d pages removed (%d -> %d) in %s\n",
+				r.Table, r.BloatRemoved, r.InitialPages, r.FinalPages, r.Duration.Round(time.Millisecond))
+			totalRemoved += r.BloatRemoved
+		}
+	}
+
+	fmt.Println()
+	fmt.Printf("Total: %d pages removed from %d tables in %s", totalRemoved, len(results)-errors, totalDuration.Round(time.Millisecond))
+	if errors > 0 {
+		fmt.Printf(" (%d errors)", errors)
+	}
+	fmt.Println()
+}
+
+// printDebloatJSON prints debloat results in JSON format
+func printDebloatJSON(results []debloatResult) {
+	// Use the output package for consistent JSON formatting
+	data := struct {
+		Results      []debloatResult `json:"results"`
+		TotalRemoved int             `json:"total_pages_removed"`
+		TablesCount  int             `json:"tables_processed"`
+	}{
+		Results:     results,
+		TablesCount: len(results),
+	}
+
+	for _, r := range results {
+		data.TotalRemoved += r.BloatRemoved
+	}
+
+	jsonBytes, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		log.Fatalf("Failed to marshal JSON: %v", err)
+	}
+	fmt.Println(string(jsonBytes))
 }

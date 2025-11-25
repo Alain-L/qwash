@@ -3,10 +3,12 @@ DO $$
 DECLARE
   bloat_levels text[] := ARRAY['low', 'medium', 'high'];
   delete_percents int[] := ARRAY[10, 30, 70];
-  multipliers text[] := ARRAY['_10x', '_100x', '_1000x'];
-
+  
+  multipliers int[] := ARRAY[10, 100, 300];  -- or ARRAY[10, 50, 300] or ARRAY[10, 20, 50, 200]
+  
   base_count int := 1000;
   mult int;
+  mult_suffix text;
   table_name text;
   version_suffix text;
   fillfactor_clause text;
@@ -16,13 +18,8 @@ DECLARE
 BEGIN
   FOR i IN 1 .. array_length(bloat_levels, 1) LOOP
     FOR j IN 1 .. array_length(multipliers, 1) LOOP
-      IF j = 1 THEN
-         mult := 10;
-      ELSIF j = 2 THEN
-         mult := 100;
-      ELSIF j = 3 THEN
-         mult := 1000;
-      END IF;
+      mult := multipliers[j];
+      mult_suffix := '_' || mult || 'x';
 
       FOR v IN 1..2 LOOP
         IF v = 1 THEN
@@ -33,7 +30,7 @@ BEGIN
            fillfactor_clause := 'fillfactor = 80, ';
         END IF;
 
-        table_name := bloat_levels[i] || '_bloat_table' || multipliers[j] || version_suffix;
+        table_name := bloat_levels[i] || '_bloat_table' || mult_suffix || version_suffix;
         EXECUTE 'DROP TABLE IF EXISTS ' || quote_ident(table_name) || ';';
 
         EXECUTE 'CREATE TABLE ' || quote_ident(table_name) || ' (
@@ -70,6 +67,7 @@ BEGIN
   END LOOP;
 END
 $$;
+ANALYZE;
 
 -- Without TOAST to compare with pg_compacttable and VACUUM FULL
 DO $$

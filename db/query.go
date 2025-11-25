@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"qwash/sql"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -13,6 +14,28 @@ import (
 // Exec executes a query without returning rows.
 func (db *DB) Exec(ctx context.Context, query string, args ...interface{}) (pgconn.CommandTag, error) {
 	return db.conn.Exec(ctx, query, args...)
+}
+
+// sanitizeTableName properly quotes a table name that may include a schema prefix.
+// E.g., "public.mytable" -> "public"."mytable", "mytable" -> "mytable"
+func sanitizeTableName(tableName string) string {
+	if strings.Contains(tableName, ".") {
+		parts := strings.SplitN(tableName, ".", 2)
+		return fmt.Sprintf("%s.%s", pgx.Identifier{parts[0]}.Sanitize(), pgx.Identifier{parts[1]}.Sanitize())
+	}
+	return pgx.Identifier{tableName}.Sanitize()
+}
+
+
+// printProgress prints a single-line progress that updates in place
+func printProgress(tableName string, pass, round int, percent float64, remaining int, stagnation, maxStagnation, unblock, maxUnblock int, status string) {
+	fmt.Printf("\r\033[K⏳ P%d R%d | %.0f%% | %d left | stag:%d/%d unblk:%d/%d | %s",
+		pass, round, percent, remaining, stagnation, maxStagnation, unblock, maxUnblock, status)
+}
+
+// clearProgress clears the progress line and moves to next line
+func clearProgress() {
+	fmt.Print("\r\033[K")
 }
 
 // QueryRow executes a query that is expected to return a single row.
@@ -65,7 +88,10 @@ func (db *DB) ListTables() ([]string, error) {
 	return databases, nil
 }
 
-// RunQwash is the core debloat operation using embedded SQL templates
+// RunQwash is the core debloat operation.
+// It moves tuples from high pages to lower pages using a single atomic transaction.
+// The tuples are reinserted and will use any PRE-EXISTING free space in lower pages.
+// VACUUM must be run AFTER this operation to reclaim the now-empty high pages.
 func (db *DB) RunQwash(tableName string, pageCount int) error {
 	if pageCount <= 0 {
 		return fmt.Errorf("invalid pageCount: must be > 0")
@@ -78,15 +104,12 @@ func (db *DB) RunQwash(tableName string, pageCount int) error {
 	}
 	defer func() {
 		if err != nil {
-			fmt.Println("⚠️  Rolling back transaction.")
 			tx.Rollback(ctx)
-		} else {
-			tx.Commit(ctx)
 		}
 	}()
 
-	// Step 1: Get CTIDs from the highest pages
-	// Select actual CTIDs (physical row locations) not IDs
+	// Step 1: Get CTIDs from the HIGHEST pages (by page number)
+	// Targeting high pages allows VACUUM to truncate the file
 	selectQuery := fmt.Sprintf(`
 		SELECT ctid
 		FROM %s
@@ -96,30 +119,31 @@ func (db *DB) RunQwash(tableName string, pageCount int) error {
 			ORDER BY (ctid::text::point)[0]::bigint DESC
 			LIMIT %d
 		)
-	`, pgx.Identifier{tableName}.Sanitize(), pgx.Identifier{tableName}.Sanitize(), pageCount)
+	`, sanitizeTableName(tableName), sanitizeTableName(tableName), pageCount)
 
 	rows, err := tx.Query(ctx, selectQuery)
 	if err != nil {
 		return fmt.Errorf("failed to fetch ctids: %w", err)
 	}
-	defer rows.Close()
 
 	var ctids []string
 	for rows.Next() {
 		var ctid string
 		if err := rows.Scan(&ctid); err != nil {
+			rows.Close()
 			return fmt.Errorf("failed to scan ctid: %w", err)
 		}
 		ctids = append(ctids, ctid)
 	}
+	rows.Close()
 	if err := rows.Err(); err != nil {
 		return err
 	}
 	if len(ctids) == 0 {
-		return fmt.Errorf("no rows found to perform qwash")
+		return nil // No rows to process
 	}
 
-	// Build placeholder string like ($1, $2, ..., $N) for CTIDs
+	// Build placeholder string for CTIDs
 	placeholders := make([]string, len(ctids))
 	args := make([]interface{}, len(ctids))
 	for i, ctid := range ctids {
@@ -128,32 +152,37 @@ func (db *DB) RunQwash(tableName string, pageCount int) error {
 	}
 	inClause := strings.Join(placeholders, ", ")
 
-	// Step 2: Create a temporary table with CTIDs
+	// Step 2: Create temp table with rows to move (dropped on commit)
 	createTempQuery := fmt.Sprintf(`
 		CREATE TEMPORARY TABLE qwash_tmp ON COMMIT DROP AS
 		SELECT * FROM %s WHERE ctid = ANY(ARRAY[%s])
-	`, pgx.Identifier{tableName}.Sanitize(), inClause)
+	`, sanitizeTableName(tableName), inClause)
 
 	if _, err := tx.Exec(ctx, createTempQuery, args...); err != nil {
-		return fmt.Errorf("failed to create temporary table: %w", err)
+		return fmt.Errorf("failed to create temp table: %w", err)
 	}
 
-	// Step 3: Delete from original table by CTID
+	// Step 3: Delete from original table
 	deleteQuery := fmt.Sprintf(`
 		DELETE FROM %s WHERE ctid = ANY(ARRAY[%s])
-	`, pgx.Identifier{tableName}.Sanitize(), inClause)
+	`, sanitizeTableName(tableName), inClause)
 
 	if _, err := tx.Exec(ctx, deleteQuery, args...); err != nil {
 		return fmt.Errorf("failed to delete rows: %w", err)
 	}
 
-	// Step 4: Reinsert from temp
+	// Step 4: Reinsert - tuples go to pre-existing free space (FSM) in lower pages
 	reinsertQuery := fmt.Sprintf(`
 		INSERT INTO %s SELECT * FROM qwash_tmp
-	`, pgx.Identifier{tableName}.Sanitize())
+	`, sanitizeTableName(tableName))
 
 	if _, err := tx.Exec(ctx, reinsertQuery); err != nil {
-		return fmt.Errorf("failed to insert rows back: %w", err)
+		return fmt.Errorf("failed to reinsert rows: %w", err)
+	}
+
+	// Commit transaction
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit: %w", err)
 	}
 
 	return nil
@@ -173,14 +202,12 @@ func (db *DB) RunQwashFilledPages(tableName string, pageCount int) error {
 	}
 	defer func() {
 		if err != nil {
-			fmt.Println("⚠️  Rolling back transaction.")
 			tx.Rollback(ctx)
-		} else {
-			tx.Commit(ctx)
 		}
 	}()
 
-	// Select CTIDs from the most filled pages (by tuple count)
+	// Select CTIDs from the LEAST filled pages (by tuple count)
+	// Emptying sparse pages allows VACUUM to reclaim them entirely
 	selectQuery := fmt.Sprintf(`
 		SELECT ctid
 		FROM %s
@@ -188,30 +215,31 @@ func (db *DB) RunQwashFilledPages(tableName string, pageCount int) error {
 			SELECT (ctid::text::point)[0]::bigint
 			FROM %s
 			GROUP BY (ctid::text::point)[0]::bigint
-			ORDER BY COUNT(*) DESC
+			ORDER BY COUNT(*) ASC
 			LIMIT %d
 		)
-	`, pgx.Identifier{tableName}.Sanitize(), pgx.Identifier{tableName}.Sanitize(), pageCount)
+	`, sanitizeTableName(tableName), sanitizeTableName(tableName), pageCount)
 
 	rows, err := tx.Query(ctx, selectQuery)
 	if err != nil {
 		return fmt.Errorf("failed to fetch ctids from filled pages: %w", err)
 	}
-	defer rows.Close()
 
 	var ctids []string
 	for rows.Next() {
 		var ctid string
 		if err := rows.Scan(&ctid); err != nil {
+			rows.Close()
 			return fmt.Errorf("failed to scan ctid: %w", err)
 		}
 		ctids = append(ctids, ctid)
 	}
+	rows.Close()
 	if err := rows.Err(); err != nil {
 		return err
 	}
 	if len(ctids) == 0 {
-		return fmt.Errorf("no rows found in filled pages")
+		return nil // No rows to process
 	}
 
 	// Build placeholder string for CTIDs
@@ -223,20 +251,20 @@ func (db *DB) RunQwashFilledPages(tableName string, pageCount int) error {
 	}
 	inClause := strings.Join(placeholders, ", ")
 
-	// Create temporary table with tuples from filled pages
+	// Create temp table with tuples from filled pages
 	createTempQuery := fmt.Sprintf(`
 		CREATE TEMPORARY TABLE qwash_tmp_filled ON COMMIT DROP AS
 		SELECT * FROM %s WHERE ctid = ANY(ARRAY[%s])
-	`, pgx.Identifier{tableName}.Sanitize(), inClause)
+	`, sanitizeTableName(tableName), inClause)
 
 	if _, err := tx.Exec(ctx, createTempQuery, args...); err != nil {
-		return fmt.Errorf("failed to create temporary table: %w", err)
+		return fmt.Errorf("failed to create temp table: %w", err)
 	}
 
 	// Delete from original table
 	deleteQuery := fmt.Sprintf(`
 		DELETE FROM %s WHERE ctid = ANY(ARRAY[%s])
-	`, pgx.Identifier{tableName}.Sanitize(), inClause)
+	`, sanitizeTableName(tableName), inClause)
 
 	if _, err := tx.Exec(ctx, deleteQuery, args...); err != nil {
 		return fmt.Errorf("failed to delete rows: %w", err)
@@ -245,10 +273,14 @@ func (db *DB) RunQwashFilledPages(tableName string, pageCount int) error {
 	// Reinsert (will be placed in pages with free space via FSM)
 	reinsertQuery := fmt.Sprintf(`
 		INSERT INTO %s SELECT * FROM qwash_tmp_filled
-	`, pgx.Identifier{tableName}.Sanitize())
+	`, sanitizeTableName(tableName))
 
 	if _, err := tx.Exec(ctx, reinsertQuery); err != nil {
-		return fmt.Errorf("failed to insert rows back: %w", err)
+		return fmt.Errorf("failed to reinsert rows: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit: %w", err)
 	}
 
 	return nil
@@ -260,16 +292,21 @@ func (db *DB) CompactTable(tableName string, initialBloatPages int) error {
 	}
 
 	ctx := context.Background()
+
+	// Set session_replication_role = replica to disable triggers during compaction
+	_, err := db.conn.Exec(ctx, "SET session_replication_role = replica")
+	if err != nil {
+		return fmt.Errorf("failed to set session_replication_role: %w", err)
+	}
+	defer db.conn.Exec(ctx, "SET session_replication_role = DEFAULT")
+
 	passNumber := 0
 	totalRounds := 0
 	stagnationCounter := 0
 	previousBloat := initialBloatPages
 
 	// Get initial actual page count
-	var initialActualPages int
-	err := db.conn.QueryRow(ctx, fmt.Sprintf(
-		"SELECT relpages FROM pg_class WHERE relname = '%s'", tableName,
-	)).Scan(&initialActualPages)
+	initialActualPages, err := db.GetTablePages(tableName)
 	if err != nil {
 		return fmt.Errorf("failed to get initial page count: %w", err)
 	}
@@ -280,12 +317,12 @@ func (db *DB) CompactTable(tableName string, initialBloatPages int) error {
 	const maxUnblockAttempts = 3 // Optimal: multiple unblock cycles for high bloat scenarios
 	unblockAttempts := 0 // Count unblock attempts in this stagnation cycle
 
-	fmt.Printf("\n🚀 Starting iterative degressive compaction for table '%s'\n", tableName)
+	fmt.Printf("\n🚀 Starting compaction for table '%s'\n", tableName)
 	fmt.Printf("📦 Initial bloat: %d pages\n", initialBloatPages)
 
 	// VACUUM once at the beginning to establish clean baseline
 	fmt.Println("🧹 Running initial VACUUM...")
-	_, err = db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s;", pgx.Identifier{tableName}.Sanitize()))
+	_, err = db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s;", sanitizeTableName(tableName)))
 	if err != nil {
 		return fmt.Errorf("initial VACUUM failed: %w", err)
 	}
@@ -293,96 +330,85 @@ func (db *DB) CompactTable(tableName string, initialBloatPages int) error {
 	// Outer loop: continue until no bloat remains
 	for {
 		passNumber++
-		fmt.Printf("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
-		fmt.Printf("🔄 PASS %d: Checking bloat...\n", passNumber)
-		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 		// Run ANALYZE to refresh statistics
-		_, err := db.conn.Exec(ctx, fmt.Sprintf("ANALYZE %s;", pgx.Identifier{tableName}.Sanitize()))
+		_, err := db.conn.Exec(ctx, fmt.Sprintf("ANALYZE %s;", sanitizeTableName(tableName)))
 		if err != nil {
+			clearProgress()
 			return fmt.Errorf("ANALYZE failed at pass %d: %w", passNumber, err)
 		}
 
 		// Recalculate bloat and get actual pages
 		bloatPages, err := db.GetBloatPages(tableName)
 		if err != nil {
+			clearProgress()
 			return fmt.Errorf("failed to calculate bloat at pass %d: %w", passNumber, err)
 		}
 
 		// Get actual page count from pg_class for accurate tracking
-		var actualPages int
-		err = db.conn.QueryRow(ctx, fmt.Sprintf(
-			"SELECT relpages FROM pg_class WHERE relname = '%s'", tableName,
-		)).Scan(&actualPages)
+		actualPages, err := db.GetTablePages(tableName)
 		if err != nil {
+			clearProgress()
 			return fmt.Errorf("failed to get actual page count: %w", err)
 		}
 
 		// Track improvement based on actual page reduction, not just bloat estimation
-		// This is more reliable as bloat estimation can be imprecise
 		improved := actualPages < bestActualPages
 
 		// Don't stop immediately when bloat estimation says 0
-		// The estimation can be imprecise, so we rely on actual page count improvement
-		if bloatPages <= 0 {
-			fmt.Printf("ℹ️  Bloat estimation reports 0 pages (actual: %d pages, best: %d pages)\n",
-				actualPages, bestActualPages)
-			if !improved {
-				// Only continue if we might still improve
-				bloatPages = 1 // Try one more small round
-			}
+		if bloatPages <= 0 && !improved {
+			bloatPages = 1 // Try one more small round
 		}
 
-		// Check if we improved the best result (based on actual pages, not estimated bloat)
+		// Check if we improved the best result
 		if improved {
-			// New best result!
-			fmt.Printf("🎯 New best result: %d actual pages (improved from %d, bloat est: %d)\n",
-				actualPages, bestActualPages, bloatPages)
 			bestActualPages = actualPages
 			passesWithoutImprovement = 0
-			unblockAttempts = 0 // Reset unblock counter on improvement
+			unblockAttempts = 0
 		} else {
-			// No improvement over best result
 			passesWithoutImprovement++
-			fmt.Printf("⚠️  No improvement over best result (current: %d pages, best: %d pages). Passes without improvement: %d/%d\n",
-				actualPages, bestActualPages, passesWithoutImprovement, maxStagnationPasses)
 
 			// Check if we should apply unblocking mechanism
 			if passesWithoutImprovement >= maxStagnationPasses {
 				if unblockAttempts < maxUnblockAttempts {
-					// Try unblocking: empty the most filled pages to redistribute tuples
 					unblockAttempts++
-					fmt.Printf("\n🔓 UNBLOCKING (attempt %d/%d): Emptying most filled pages to break stagnation...\n",
-						unblockAttempts, maxUnblockAttempts)
-					fmt.Printf("   (Will empty %d most filled pages)\n", bloatPages)
 
-					// VACUUM before unblocking
-					fmt.Println("🧹 Running VACUUM before unblocking...")
-					_, err := db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s;", pgx.Identifier{tableName}.Sanitize()))
-					if err != nil {
-						return fmt.Errorf("VACUUM before unblock failed: %w", err)
+					// Unblock by redistributing ALL pages in chunks
+					pagesLeft := actualPages
+					chunkSize := 50
+					unblockRound := 0
+					for pagesLeft > 0 {
+						if chunkSize > pagesLeft {
+							chunkSize = pagesLeft
+						}
+						unblockRound++
+						printProgress(tableName, passNumber, unblockRound, float64(actualPages-pagesLeft)/float64(actualPages)*100, pagesLeft,
+							passesWithoutImprovement, maxStagnationPasses, unblockAttempts, maxUnblockAttempts, "Unblocking...")
+
+						if err := db.RunQwashFilledPages(tableName, chunkSize); err != nil {
+							clearProgress()
+							return fmt.Errorf("unblock operation failed: %w", err)
+						}
+						pagesLeft -= chunkSize
+
+						// VACUUM after each chunk
+						_, err := db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s;", sanitizeTableName(tableName)))
+						if err != nil {
+							clearProgress()
+							return fmt.Errorf("VACUUM during unblock failed: %w", err)
+						}
 					}
 
-					// Empty the most filled pages
-					if err := db.RunQwashFilledPages(tableName, bloatPages); err != nil {
-						return fmt.Errorf("unblock operation failed: %w", err)
-					}
-
-					fmt.Println("✅ Unblocking complete. Resuming normal compaction...")
-					passesWithoutImprovement = 0 // Reset counter to give it a chance after unblocking
+					passesWithoutImprovement = 0
 					previousBloat = bloatPages
-					continue // Skip to next pass
+					continue
 				} else {
-					// Already tried maximum unblock attempts and still no improvement - stop
-					fmt.Printf("\n🛑 Stopping: No improvement after %d passes (%d unblock attempts exhausted).\n",
-						maxStagnationPasses, maxUnblockAttempts)
-					fmt.Printf("   Best result achieved: %d actual pages (current: %d pages)\n", bestActualPages, actualPages)
-					break
+					break // Stop: unblock attempts exhausted
 				}
 			}
 		}
 
-		// Also track simple stagnation for old logic compatibility
+		// Track stagnation
 		if bloatPages >= previousBloat {
 			stagnationCounter++
 		} else {
@@ -390,13 +416,9 @@ func (db *DB) CompactTable(tableName string, initialBloatPages int) error {
 		}
 		previousBloat = bloatPages
 
-		fmt.Printf("📦 Bloat detected: %d pages → starting compaction pass %d\n", bloatPages, passNumber)
-
 		// Inner loop: degressive compaction for this pass
 		pagesRemaining := bloatPages
 		roundNumber := 0
-		roundsSinceLastVacuum := 0
-		const vacuumThreshold = 1 // VACUUM every round for 100% precision
 
 		for pagesRemaining > 0 {
 			// Calculate pages to process this round (degressive, adaptive to total bloat)
@@ -448,81 +470,78 @@ func (db *DB) CompactTable(tableName string, initialBloatPages int) error {
 				pagesThisRound = pagesRemaining
 			}
 
+			// Progress indicator (updates in place)
+			percentDone := float64(bloatPages-pagesRemaining) / float64(bloatPages) * 100
+			printProgress(tableName, passNumber, roundNumber+1, percentDone, pagesRemaining,
+				passesWithoutImprovement, maxStagnationPasses, unblockAttempts, maxUnblockAttempts, "Compacting...")
+
 			// Execute qwash on pagesThisRound pages
 			if err := db.RunQwash(tableName, pagesThisRound); err != nil {
+				clearProgress()
 				return fmt.Errorf("RunQwash failed at pass %d, round %d: %w", passNumber, roundNumber+1, err)
 			}
 
 			pagesRemaining -= pagesThisRound
 			roundNumber++
 			totalRounds++
-			roundsSinceLastVacuum++
 
-			// Progress indicator
-			percentDone := float64(bloatPages-pagesRemaining) / float64(bloatPages) * 100
-			fmt.Printf("⏳ Pass %d, Round %d: processed %d pages (%.1f%% of pass done, %d pages remaining)\n",
-				passNumber, roundNumber, pagesThisRound, percentDone, pagesRemaining)
-
-			// Conditional VACUUM: every round for 100% precision
-			if roundsSinceLastVacuum >= vacuumThreshold || pagesRemaining == 0 {
-				fmt.Printf("🧹 Running VACUUM after %d rounds...\n", roundsSinceLastVacuum)
-				_, err := db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s;", pgx.Identifier{tableName}.Sanitize()))
-				if err != nil {
-					return fmt.Errorf("VACUUM failed at pass %d, round %d: %w", passNumber, roundNumber, err)
-				}
-				roundsSinceLastVacuum = 0
+			// VACUUM after each round to:
+			// 1. Reclaim space from deleted tuples (high pages become empty)
+			// 2. Update FSM so next round's INSERT can use freed space
+			_, err := db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s;", sanitizeTableName(tableName)))
+			if err != nil {
+				clearProgress()
+				return fmt.Errorf("VACUUM failed at pass %d, round %d: %w", passNumber, roundNumber, err)
 			}
 		}
 
-		fmt.Printf("✅ Pass %d complete: %d rounds executed\n", passNumber, roundNumber)
+		clearProgress()
+		// Go to line 2, print pass completion, go back to line 1
+		fmt.Print("\n")                                                                      // go to line 2
+		fmt.Printf("\r\033[K✅ Pass %d done | %d rounds | %d pages", passNumber, roundNumber, actualPages) // update line 2
+		fmt.Print("\033[A\r")                                                                // back to start of line 1
 
 		// Run ANALYZE after each pass to update statistics for next bloat check
-		_, err = db.conn.Exec(ctx, fmt.Sprintf("ANALYZE %s;", pgx.Identifier{tableName}.Sanitize()))
+		_, err = db.conn.Exec(ctx, fmt.Sprintf("ANALYZE %s;", sanitizeTableName(tableName)))
 		if err != nil {
 			return fmt.Errorf("ANALYZE failed after pass %d: %w", passNumber, err)
 		}
 	}
 
 	// Final VACUUM to truncate empty trailing pages
-	fmt.Println("\n🧹 Running final VACUUM to truncate empty pages...")
-	_, err = db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s;", pgx.Identifier{tableName}.Sanitize()))
+	fmt.Print("\n\n") // go past line 2 to line 3
+	fmt.Println("🧹 Running final VACUUM...")
+	_, err = db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s;", sanitizeTableName(tableName)))
 	if err != nil {
 		return fmt.Errorf("final VACUUM failed: %w", err)
 	}
 
-	// 🔍 Display highest CTIDs at the end
-	query := fmt.Sprintf(`SELECT ctid FROM %s ORDER BY ctid DESC LIMIT 2`, pgx.Identifier{tableName}.Sanitize())
-	rows, err := db.conn.Query(ctx, query)
-	if err != nil {
-		return fmt.Errorf("failed to fetch ctids after compaction: %w", err)
-	}
-	defer rows.Close()
-
-	fmt.Println("\n🔎 Highest CTIDs after final compaction:")
-	for rows.Next() {
-		var ctid string
-		if err := rows.Scan(&ctid); err != nil {
-			return fmt.Errorf("failed to scan ctid: %w", err)
-		}
-		fmt.Printf("  - %s\n", ctid)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("error iterating over ctid rows: %w", err)
-	}
-
-	fmt.Printf("\n🎯 Full compaction complete: %d passes, %d total rounds\n", passNumber-1, totalRounds)
+	// Get final page count
+	finalPages, _ := db.GetTablePages(tableName)
+	fmt.Printf("🎯 Compaction: %d → %d pages (%d passes, %d rounds)\n",
+		initialActualPages, finalPages, passNumber, totalRounds)
 	return nil
 }
 
-// getBloatPages calculates the number of bloated pages for a given table.
+// GetBloatPages calculates the number of bloated pages for a given table
+// using estimation based on pg_stat_user_tables.
 func (db *DB) GetBloatPages(tableName string) (int, error) {
 	ctx := context.Background()
+
+	// Handle schema-qualified table names (e.g., "public.mytable")
+	var whereClause string
+	if strings.Contains(tableName, ".") {
+		parts := strings.SplitN(tableName, ".", 2)
+		whereClause = fmt.Sprintf("WHERE schemaname = '%s' AND tblname = '%s'", parts[0], parts[1])
+	} else {
+		whereClause = fmt.Sprintf("WHERE tblname = '%s'", tableName)
+	}
 
 	// Inject the WHERE clause before the ORDER BY
 	modifiedQuery := strings.Replace(
 		sql.TableBloatSQL,
 		"ORDER BY bloat_pct DESC;",
-		fmt.Sprintf("WHERE tblname = '%s'\nORDER BY bloat_pct DESC;", tableName),
+		whereClause+"\nORDER BY bloat_pct DESC;",
 		1,
 	)
 
@@ -530,15 +549,15 @@ func (db *DB) GetBloatPages(tableName string) (int, error) {
 	row := db.conn.QueryRow(ctx, modifiedQuery)
 
 	var (
-		_           string  // table_name
-		_           int     // live_tup
-		_           int64   // dead_tup
+		_           string   // table_name
+		_           int      // live_tup
+		_           int64    // dead_tup
 		minPages    int
 		actualPages int
-		_           int     // fillfactor
-		_           string  // relation_size
-		_           string  // TOAST_size
-		_           string  // bloat_size
+		_           int      // fillfactor
+		_           string   // relation_size
+		_           string   // TOAST_size
+		_           string   // bloat_size
 		bloatPct    *float64 // bloat_pct (nullable)
 	)
 
@@ -562,7 +581,518 @@ func (db *DB) GetBloatPages(tableName string) (int, error) {
 		return 0, fmt.Errorf("error querying bloat info: %w", err)
 	}
 
-	diff := actualPages - minPages
-	fmt.Printf("📦 %d bloat pages (%d - %d) estimated for table %s.\n", diff, actualPages, minPages, tableName)
-	return diff, nil
+	return actualPages - minPages, nil
+}
+
+// ListTablesFiltered returns tables filtered by schemas, system flag, and exclusion list.
+func (db *DB) ListTablesFiltered(schemas []string, includeSystem bool, excludeTables []string) ([]string, error) {
+	ctx := context.Background()
+
+	// Build WHERE conditions
+	var conditions []string
+
+	// Filter by schemas if specified
+	if len(schemas) > 0 {
+		placeholders := make([]string, len(schemas))
+		for i := range schemas {
+			placeholders[i] = fmt.Sprintf("'%s'", schemas[i])
+		}
+		conditions = append(conditions, fmt.Sprintf("n.nspname IN (%s)", strings.Join(placeholders, ", ")))
+	} else if !includeSystem {
+		// Exclude system schemas by default
+		conditions = append(conditions, "n.nspname NOT IN ('pg_catalog', 'pg_toast', 'information_schema')")
+	}
+
+	// Exclude specific tables
+	if len(excludeTables) > 0 {
+		placeholders := make([]string, len(excludeTables))
+		for i := range excludeTables {
+			placeholders[i] = fmt.Sprintf("'%s'", excludeTables[i])
+		}
+		conditions = append(conditions, fmt.Sprintf("c.relname NOT IN (%s)", strings.Join(placeholders, ", ")))
+	}
+
+	// Only regular tables (not indexes, sequences, etc.)
+	conditions = append(conditions, "c.relkind = 'r'")
+
+	whereClause := ""
+	if len(conditions) > 0 {
+		whereClause = "WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	query := fmt.Sprintf(`
+		SELECT n.nspname || '.' || c.relname AS full_name
+		FROM pg_class c
+		JOIN pg_namespace n ON c.relnamespace = n.oid
+		%s
+		ORDER BY c.relname
+	`, whereClause)
+
+	rows, err := db.conn.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("error querying tables: %w", err)
+	}
+	defer rows.Close()
+
+	var tables []string
+	for rows.Next() {
+		var tableName string
+		if err := rows.Scan(&tableName); err != nil {
+			return nil, fmt.Errorf("error scanning table name: %w", err)
+		}
+		tables = append(tables, tableName)
+	}
+	return tables, nil
+}
+
+// GetTablePages returns the number of pages for a table from pg_class.
+func (db *DB) GetTablePages(tableName string) (int, error) {
+	ctx := context.Background()
+
+	// Handle schema-qualified table names
+	var schemaName, relName string
+	if strings.Contains(tableName, ".") {
+		parts := strings.SplitN(tableName, ".", 2)
+		schemaName = parts[0]
+		relName = parts[1]
+	} else {
+		relName = tableName
+	}
+
+	var query string
+	if schemaName != "" {
+		query = fmt.Sprintf(`
+			SELECT c.relpages
+			FROM pg_class c
+			JOIN pg_namespace n ON c.relnamespace = n.oid
+			WHERE c.relname = '%s' AND n.nspname = '%s'
+		`, relName, schemaName)
+	} else {
+		query = fmt.Sprintf("SELECT relpages FROM pg_class WHERE relname = '%s'", relName)
+	}
+
+	var pages int
+	err := db.conn.QueryRow(ctx, query).Scan(&pages)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get page count for '%s': %w", tableName, err)
+	}
+	return pages, nil
+}
+
+// CompactTableFast performs faster compaction with adaptive vacuum threshold (~99% efficiency).
+// This is faster than CompactTable but may leave 1-2 pages of bloat on very large tables.
+func (db *DB) CompactTableFast(tableName string, initialBloatPages int) error {
+	if initialBloatPages <= 0 {
+		return fmt.Errorf("invalid bloat pages: must be > 0")
+	}
+
+	ctx := context.Background()
+
+	// Set session_replication_role = replica to disable triggers during compaction
+	_, err := db.conn.Exec(ctx, "SET session_replication_role = replica")
+	if err != nil {
+		return fmt.Errorf("failed to set session_replication_role: %w", err)
+	}
+	defer db.conn.Exec(ctx, "SET session_replication_role = DEFAULT")
+
+	passNumber := 0
+	totalRounds := 0
+	stagnationCounter := 0
+	previousBloat := initialBloatPages
+
+	// Get initial actual page count
+	initialActualPages, err := db.GetTablePages(tableName)
+	if err != nil {
+		return fmt.Errorf("failed to get initial page count: %w", err)
+	}
+
+	bestActualPages := initialActualPages
+	passesWithoutImprovement := 0
+	const maxStagnationPasses = 3 // Fast: stop quickly if no progress
+	const maxUnblockAttempts = 1  // Fast: one unblock attempt max
+	const targetBloatPct = 10.0   // Fast: stop when bloat < 10%
+	unblockAttempts := 0
+
+	fmt.Printf("\n🚀 Starting FAST compaction for table '%s' (target: <%.0f%% bloat)\n", tableName, targetBloatPct)
+	fmt.Printf("📦 Initial bloat: %d pages\n", initialBloatPages)
+
+	// VACUUM once at the beginning
+	fmt.Println("🧹 Running initial VACUUM...")
+	_, err = db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s;", sanitizeTableName(tableName)))
+	if err != nil {
+		return fmt.Errorf("initial VACUUM failed: %w", err)
+	}
+
+	// Outer loop: continue until no bloat remains
+	for {
+		passNumber++
+
+		// Run ANALYZE to refresh statistics
+		_, err := db.conn.Exec(ctx, fmt.Sprintf("ANALYZE %s;", sanitizeTableName(tableName)))
+		if err != nil {
+			return fmt.Errorf("ANALYZE failed at pass %d: %w", passNumber, err)
+		}
+
+		// Recalculate bloat and get actual pages
+		bloatPages, err := db.GetBloatPages(tableName)
+		if err != nil {
+			return fmt.Errorf("failed to calculate bloat at pass %d: %w", passNumber, err)
+		}
+
+		// Get actual page count from pg_class
+		actualPages, err := db.GetTablePages(tableName)
+		if err != nil {
+			return fmt.Errorf("failed to get actual page count: %w", err)
+		}
+
+		// Calculate current bloat percentage
+		bloatPct := float64(bloatPages) / float64(actualPages) * 100
+		if bloatPct < targetBloatPct {
+			// Target reached, stop
+			break
+		}
+
+		improved := actualPages < bestActualPages
+
+		if bloatPages <= 0 && !improved {
+			bloatPages = 1
+		}
+
+		if improved {
+			bestActualPages = actualPages
+			passesWithoutImprovement = 0
+			unblockAttempts = 0
+		} else {
+			passesWithoutImprovement++
+
+			if passesWithoutImprovement >= maxStagnationPasses {
+				if unblockAttempts < maxUnblockAttempts {
+					unblockAttempts++
+
+					// Unblock by redistributing ALL pages in chunks
+					pagesLeft := actualPages
+					chunkSize := 50
+					unblockRound := 0
+					for pagesLeft > 0 {
+						if chunkSize > pagesLeft {
+							chunkSize = pagesLeft
+						}
+						unblockRound++
+						printProgress(tableName, passNumber, unblockRound, float64(actualPages-pagesLeft)/float64(actualPages)*100, pagesLeft,
+							passesWithoutImprovement, maxStagnationPasses, unblockAttempts, maxUnblockAttempts, "Unblocking...")
+
+						if err := db.RunQwashFilledPages(tableName, chunkSize); err != nil {
+							return fmt.Errorf("unblock operation failed: %w", err)
+						}
+						pagesLeft -= chunkSize
+
+						// VACUUM after each chunk
+						_, err := db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s;", sanitizeTableName(tableName)))
+						if err != nil {
+							return fmt.Errorf("VACUUM during unblock failed: %w", err)
+						}
+					}
+
+					passesWithoutImprovement = 0
+					previousBloat = bloatPages
+					continue
+				} else {
+					break
+				}
+			}
+		}
+
+		if bloatPages >= previousBloat {
+			stagnationCounter++
+		} else {
+			stagnationCounter = 0
+		}
+		previousBloat = bloatPages
+
+		// Inner loop: degressive compaction with adaptive VACUUM
+		pagesRemaining := bloatPages
+		roundNumber := 0
+		roundsSinceLastVacuum := 0
+
+		// Adaptive vacuum threshold: much less frequent VACUUM for speed
+		getVacuumThreshold := func(remaining int) int {
+			if remaining > 500 {
+				return 20 // VACUUM every 20 rounds
+			} else if remaining > 100 {
+				return 10
+			} else if remaining > 20 {
+				return 5
+			}
+			return 2
+		}
+
+		for pagesRemaining > 0 {
+			var pagesThisRound int
+			if pagesRemaining > 500 {
+				pagesThisRound = 50
+			} else if pagesRemaining > 100 {
+				pagesThisRound = 20
+			} else if pagesRemaining > 20 {
+				pagesThisRound = 5
+			} else if pagesRemaining > 5 {
+				pagesThisRound = 2
+			} else {
+				pagesThisRound = 1
+			}
+
+			if pagesThisRound > pagesRemaining {
+				pagesThisRound = pagesRemaining
+			}
+
+			// Progress indicator (updates in place)
+			percentDone := float64(bloatPages-pagesRemaining) / float64(bloatPages) * 100
+			printProgress(tableName, passNumber, roundNumber+1, percentDone, pagesRemaining,
+				passesWithoutImprovement, maxStagnationPasses, unblockAttempts, maxUnblockAttempts, "Compacting...")
+
+			// Execute qwash
+			if err := db.RunQwash(tableName, pagesThisRound); err != nil {
+				clearProgress()
+				return fmt.Errorf("RunQwash failed at pass %d, round %d: %w", passNumber, roundNumber+1, err)
+			}
+
+			pagesRemaining -= pagesThisRound
+			roundNumber++
+			totalRounds++
+			roundsSinceLastVacuum++
+
+			// Adaptive VACUUM: less frequent for speed, more frequent near end
+			vacuumThreshold := getVacuumThreshold(pagesRemaining)
+			if roundsSinceLastVacuum >= vacuumThreshold || pagesRemaining == 0 {
+				_, err := db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s;", sanitizeTableName(tableName)))
+				if err != nil {
+					clearProgress()
+					return fmt.Errorf("VACUUM failed: %w", err)
+				}
+				roundsSinceLastVacuum = 0
+			}
+		}
+
+		clearProgress()
+		// Go to line 2, print pass completion, go back to line 1
+		fmt.Print("\n")
+		fmt.Printf("\r\033[K✅ Pass %d done | %d rounds | %d pages", passNumber, roundNumber, actualPages)
+		fmt.Print("\033[A\r")
+
+		_, err = db.conn.Exec(ctx, fmt.Sprintf("ANALYZE %s;", sanitizeTableName(tableName)))
+		if err != nil {
+			return fmt.Errorf("ANALYZE failed after pass %d: %w", passNumber, err)
+		}
+	}
+
+	// Final VACUUM
+	fmt.Print("\n\n")
+	fmt.Println("🧹 Running final VACUUM...")
+	_, err = db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s;", sanitizeTableName(tableName)))
+	if err != nil {
+		return fmt.Errorf("final VACUUM failed: %w", err)
+	}
+
+	finalPages, _ := db.GetTablePages(tableName)
+	fmt.Printf("🎯 FAST compaction: %d → %d pages (%d passes, %d rounds)\n",
+		initialActualPages, finalPages, passNumber, totalRounds)
+	return nil
+}
+
+// CompactTableSlow performs conservative compaction, processing 1 page at a time with delays.
+// This approach is similar to pgcompacttable: very gentle on production systems.
+func (db *DB) CompactTableSlow(tableName string, initialBloatPages int, delayMs int) error {
+	if initialBloatPages <= 0 {
+		return fmt.Errorf("invalid bloat pages: must be > 0")
+	}
+
+	ctx := context.Background()
+	delay := time.Duration(delayMs) * time.Millisecond
+
+	// Set session_replication_role = replica to disable triggers during compaction
+	_, err := db.conn.Exec(ctx, "SET session_replication_role = replica")
+	if err != nil {
+		return fmt.Errorf("failed to set session_replication_role: %w", err)
+	}
+	defer db.conn.Exec(ctx, "SET session_replication_role = DEFAULT")
+
+	// Get initial actual page count
+	initialActualPages, err := db.GetTablePages(tableName)
+	if err != nil {
+		return fmt.Errorf("failed to get initial page count: %w", err)
+	}
+
+	fmt.Printf("\n🐢 Starting SLOW compaction for table '%s' (1 page at a time, %dms delay)\n", tableName, delayMs)
+	fmt.Printf("📦 Initial bloat: %d pages\n", initialBloatPages)
+
+	// VACUUM once at the beginning to establish clean baseline
+	fmt.Println("🧹 Running initial VACUUM...")
+	_, err = db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s;", sanitizeTableName(tableName)))
+	if err != nil {
+		return fmt.Errorf("initial VACUUM failed: %w", err)
+	}
+
+	totalRounds := 0
+	passNumber := 0
+	bestActualPages := initialActualPages
+	passesWithoutImprovement := 0
+	const maxStagnationPasses = 6
+	const maxUnblockAttempts = 3
+	unblockAttempts := 0
+
+	// Outer loop: continue until no progress
+	for {
+		passNumber++
+
+		// Run ANALYZE to refresh statistics
+		_, err := db.conn.Exec(ctx, fmt.Sprintf("ANALYZE %s;", sanitizeTableName(tableName)))
+		if err != nil {
+			clearProgress()
+			return fmt.Errorf("ANALYZE failed at pass %d: %w", passNumber, err)
+		}
+
+		// Recalculate bloat
+		bloatPages, err := db.GetBloatPages(tableName)
+		if err != nil {
+			clearProgress()
+			return fmt.Errorf("failed to calculate bloat at pass %d: %w", passNumber, err)
+		}
+
+		actualPages, err := db.GetTablePages(tableName)
+		if err != nil {
+			clearProgress()
+			return fmt.Errorf("failed to get actual page count: %w", err)
+		}
+
+		improved := actualPages < bestActualPages
+
+		if bloatPages <= 0 && !improved {
+			bloatPages = 1
+		}
+
+		if improved {
+			bestActualPages = actualPages
+			passesWithoutImprovement = 0
+			unblockAttempts = 0
+		} else {
+			passesWithoutImprovement++
+
+			if passesWithoutImprovement >= maxStagnationPasses {
+				if unblockAttempts < maxUnblockAttempts {
+					unblockAttempts++
+
+					// Unblock by redistributing pages
+					pagesLeft := actualPages
+					unblockRound := 0
+					for pagesLeft > 0 {
+						unblockRound++
+						printProgress(tableName, passNumber, unblockRound, float64(actualPages-pagesLeft)/float64(actualPages)*100, pagesLeft,
+							passesWithoutImprovement, maxStagnationPasses, unblockAttempts, maxUnblockAttempts, "Unblocking...")
+
+						if err := db.RunQwashFilledPages(tableName, 1); err != nil {
+							clearProgress()
+							return fmt.Errorf("unblock operation failed: %w", err)
+						}
+						pagesLeft--
+
+						// VACUUM after each page
+						_, err := db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s;", sanitizeTableName(tableName)))
+						if err != nil {
+							clearProgress()
+							return fmt.Errorf("VACUUM during unblock failed: %w", err)
+						}
+
+						// Delay between operations
+						time.Sleep(delay)
+					}
+
+					passesWithoutImprovement = 0
+					continue
+				} else {
+					break
+				}
+			}
+		}
+
+		// Inner loop: process 1 page at a time (like pgcompacttable)
+		pagesRemaining := bloatPages
+		roundNumber := 0
+
+		for pagesRemaining > 0 {
+			// Always process exactly 1 page (conservative approach)
+			pagesThisRound := 1
+
+			// Progress indicator
+			percentDone := float64(bloatPages-pagesRemaining) / float64(bloatPages) * 100
+			printProgress(tableName, passNumber, roundNumber+1, percentDone, pagesRemaining,
+				passesWithoutImprovement, maxStagnationPasses, unblockAttempts, maxUnblockAttempts, "Compacting...")
+
+			// Execute qwash on 1 page
+			if err := db.RunQwash(tableName, pagesThisRound); err != nil {
+				clearProgress()
+				return fmt.Errorf("RunQwash failed at pass %d, round %d: %w", passNumber, roundNumber+1, err)
+			}
+
+			pagesRemaining -= pagesThisRound
+			roundNumber++
+			totalRounds++
+
+			// VACUUM after each page
+			_, err := db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s;", sanitizeTableName(tableName)))
+			if err != nil {
+				clearProgress()
+				return fmt.Errorf("VACUUM failed at pass %d, round %d: %w", passNumber, roundNumber, err)
+			}
+
+			// Delay between operations (like pgcompacttable)
+			time.Sleep(delay)
+		}
+
+		clearProgress()
+		fmt.Print("\n")
+		fmt.Printf("\r\033[K✅ Pass %d done | %d rounds | %d pages", passNumber, roundNumber, actualPages)
+		fmt.Print("\033[A\r")
+
+		// Run ANALYZE after each pass
+		_, err = db.conn.Exec(ctx, fmt.Sprintf("ANALYZE %s;", sanitizeTableName(tableName)))
+		if err != nil {
+			return fmt.Errorf("ANALYZE failed after pass %d: %w", passNumber, err)
+		}
+	}
+
+	// Final VACUUM
+	fmt.Print("\n\n")
+	fmt.Println("🧹 Running final VACUUM...")
+	_, err = db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s;", sanitizeTableName(tableName)))
+	if err != nil {
+		return fmt.Errorf("final VACUUM failed: %w", err)
+	}
+
+	finalPages, _ := db.GetTablePages(tableName)
+	fmt.Printf("🎯 SLOW compaction: %d → %d pages (%d passes, %d rounds)\n",
+		initialActualPages, finalPages, passNumber, totalRounds)
+	return nil
+}
+
+// ReindexTable runs REINDEX CONCURRENTLY on a table to rebuild all its indexes.
+func (db *DB) ReindexTable(tableName string) error {
+	ctx := context.Background()
+
+	// REINDEX CONCURRENTLY requires PostgreSQL 12+
+	// It rebuilds indexes without blocking writes
+	query := fmt.Sprintf("REINDEX TABLE CONCURRENTLY %s", sanitizeTableName(tableName))
+
+	fmt.Printf("🔧 Running REINDEX CONCURRENTLY on %s...\n", tableName)
+	_, err := db.conn.Exec(ctx, query)
+	if err != nil {
+		// If CONCURRENTLY fails (e.g., PG < 12), try regular REINDEX
+		fmt.Println("⚠️  REINDEX CONCURRENTLY failed, trying regular REINDEX...")
+		query = fmt.Sprintf("REINDEX TABLE %s", sanitizeTableName(tableName))
+		_, err = db.conn.Exec(ctx, query)
+		if err != nil {
+			return fmt.Errorf("REINDEX failed: %w", err)
+		}
+	}
+
+	fmt.Printf("✅ REINDEX complete for %s\n", tableName)
+	return nil
 }
