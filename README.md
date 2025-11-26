@@ -106,13 +106,28 @@ Other:
 
 ## How It Works
 
+### What is Bloat?
+
+In PostgreSQL, **bloat** is wasted space inside table files. It's not just about dead tuples (`n_dead_tup`).
+
+Even after `VACUUM` removes dead tuples, pages may remain partially filled:
+- Deleted rows leave gaps that new inserts may not perfectly fill
+- Updates create new row versions, fragmenting data across pages
+- `VACUUM` frees space *within* pages but doesn't move rows between pages
+- Over time, pages become sparsely populated
+
+**Example:** A table might show `n_dead_tup = 0` after VACUUM, yet still use 100 pages when the live data could fit in 60. Those 40 extra pages are bloat — they consume disk space and slow down sequential scans.
+
+Only `VACUUM FULL` (or tools like qwash) can reclaim this space by rewriting the table more compactly.
+
 ### Bloat Estimation
 
-qwash analyzes PostgreSQL system catalogs (`pg_class`, `pg_stat_user_tables`, `pg_stats`) to estimate bloat without requiring the `pgstattuple` extension. It calculates:
+qwash analyzes PostgreSQL system catalogs (`pg_class`, `pg_stat_user_tables`, `pg_stats`) to estimate bloat without requiring the `pgstattuple` extension. It compares:
 
-- **Table size** vs **minimum required pages** based on tuple count and size
-- **Dead tuples** awaiting vacuum
-- **Bloat ratio** as a percentage
+- **Actual table size** (pages currently allocated)
+- **Minimum required pages** (calculated from live tuple count and average tuple size)
+
+The difference is the estimated bloat.
 
 ### Bloat Reduction Algorithm
 
