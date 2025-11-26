@@ -11,17 +11,15 @@ This folder contains all SQL queries used by qwash for bloat estimation and redu
   - No extensions required (pure SQL)
   - Output: table_name, live_tup, dead_tup, min_pages, actual_pages, bloat_size, bloat_pct
 
-- **`btree_bloat.sql`**: Estimate B-Tree index bloat
-  - Identifies bloated indexes
-  - Useful for index maintenance planning
+- **`btree_bloat.sql`**: Estimate B-Tree index bloat (work in progress)
 
-### Debloat Algorithm Queries
+### Algorithm Demo
 
-- **`debloat_algorithm.sql`**: Complete documentation of qwash's debloat algorithm
-  - Step-by-step SQL queries used during debloat operations
-  - Includes explanatory comments for each step
+- **`demo.sql`**: Step-by-step demonstration of qwash's debloat algorithm
+  - Executable examples you can run in psql
+  - Three demos with increasing complexity
   - Shows how rows are moved from high pages to low pages
-  - Documents VACUUM/ANALYZE frequency strategy
+  - Illustrates bloat reduction at each iteration
 
 ## Usage
 
@@ -30,15 +28,15 @@ This folder contains all SQL queries used by qwash for bloat estimation and redu
 ```bash
 # Estimate table bloat
 psql -d mydb -f sql/table_bloat.sql
-
-# Estimate index bloat
-psql -d mydb -f sql/btree_bloat.sql
 ```
 
 ### For Understanding the Algorithm
 
-The `debloat_algorithm.sql` file is **documentation only** and should not be executed directly.
-It shows the SQL queries used internally by qwash's `--debloat` mode.
+Run `demo.sql` step-by-step in psql to see how qwash works:
+```bash
+psql -d mydb
+# Then execute queries one by one from demo.sql
+```
 
 To actually debloat tables, use the qwash CLI:
 ```bash
@@ -70,5 +68,5 @@ rows := db.Query(sql.TableBloatSQL)
 
 ## Safety
 
-- **Estimation queries** (`table_bloat.sql`, `btree_bloat.sql`): 100% safe, read-only
-- **Debloat queries** (in `debloat_algorithm.sql`): Documentation only, use via CLI for safety
+- **Estimation queries** (`table_bloat.sql`): 100% safe, read-only
+- **Demo queries** (`demo.sql`): Creates/drops a `demo_qwash` table for demonstration

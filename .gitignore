@@ -31,6 +31,7 @@ Thumbs.db
 *.swp
 *.swo
 *~
+CLAUDE.md
 
 # Environment files
 .env
