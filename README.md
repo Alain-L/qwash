@@ -268,7 +268,7 @@ go test ./tests -run TestEstimate -v
 ## References
 
 - [`sql/POC.sql`](sql/POC.sql) — Step-by-step SQL demo of the qwash algorithm
-- [ioguix/pgsql-bloat-estimation](https://github.com/ioguix/pgsql-bloat-estimation) — SQL queries for bloat estimation
+- [ioguix/pgsql-bloat-estimation](https://github.com/ioguix/pgsql-bloat-estimation) — Approach for stats-based bloat estimation without pgstattuple
 - [dataegret/pgcompacttable](https://github.com/dataegret/pgcompacttable) — Perl tool for reorganizing bloated tables without locks
 
 ## License
