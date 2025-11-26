@@ -81,6 +81,11 @@ func DetectTableBloat(ctx context.Context, dbConn *db.DB) ([]BloatTable, error) 
 			TableSize:  tableSize,
 			BloatSize:  bloatSize,
 			BloatRatio: bloatRatio,
+			Pages:      actualPages,
+			MinPages:   minPages,
+			LiveTuples: int64(liveTup),
+			DeadTuples: deadTup,
+			FillFactor: fillfactor,
 		}
 
 		bloatTables = append(bloatTables, tbl)

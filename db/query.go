@@ -28,13 +28,29 @@ func sanitizeTableName(tableName string) string {
 
 
 // printProgress prints a single-line progress that updates in place
-func printProgress(tableName string, pass, round int, percent float64, remaining int, stagnation, maxStagnation, unblock, maxUnblock int, status string) {
-	fmt.Printf("\r\033[K⏳ P%d R%d | %.0f%% | %d left | stag:%d/%d unblk:%d/%d | %s",
-		pass, round, percent, remaining, stagnation, maxStagnation, unblock, maxUnblock, status)
+func printProgress(db *DB, tableName string, pass int) {
+	if db.SilentProgress {
+		return
+	}
+	tableWord := "tables"
+	if db.TotalTables == 1 {
+		tableWord = "table"
+	}
+	// Truncate table name if too long for stable display
+	displayName := tableName
+	if len(displayName) > 40 {
+		displayName = displayName[:37] + "..."
+	}
+	// Fixed-width format: table name (40 chars), pass (2 digits), index/total (2/2 digits)
+	fmt.Printf("\r\033[K%-40s | Pass %2d | %2d/%2d %s",
+		displayName, pass, db.CurrentTableIndex, db.TotalTables, tableWord)
 }
 
 // clearProgress clears the progress line and moves to next line
-func clearProgress() {
+func clearProgress(db *DB) {
+	if db.SilentProgress {
+		return
+	}
 	fmt.Print("\r\033[K")
 }
 
@@ -317,11 +333,11 @@ func (db *DB) CompactTable(tableName string, initialBloatPages int) error {
 	const maxUnblockAttempts = 3 // Optimal: multiple unblock cycles for high bloat scenarios
 	unblockAttempts := 0 // Count unblock attempts in this stagnation cycle
 
-	fmt.Printf("\n🚀 Starting compaction for table '%s'\n", tableName)
-	fmt.Printf("📦 Initial bloat: %d pages\n", initialBloatPages)
+	if db.Verbose {
+		fmt.Printf("Compacting '%s' (%d bloat pages)...\n", tableName, initialBloatPages)
+	}
 
 	// VACUUM once at the beginning to establish clean baseline
-	fmt.Println("🧹 Running initial VACUUM...")
 	_, err = db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s;", sanitizeTableName(tableName)))
 	if err != nil {
 		return fmt.Errorf("initial VACUUM failed: %w", err)
@@ -334,21 +350,21 @@ func (db *DB) CompactTable(tableName string, initialBloatPages int) error {
 		// Run ANALYZE to refresh statistics
 		_, err := db.conn.Exec(ctx, fmt.Sprintf("ANALYZE %s;", sanitizeTableName(tableName)))
 		if err != nil {
-			clearProgress()
+			clearProgress(db)
 			return fmt.Errorf("ANALYZE failed at pass %d: %w", passNumber, err)
 		}
 
 		// Recalculate bloat and get actual pages
 		bloatPages, err := db.GetBloatPages(tableName)
 		if err != nil {
-			clearProgress()
+			clearProgress(db)
 			return fmt.Errorf("failed to calculate bloat at pass %d: %w", passNumber, err)
 		}
 
 		// Get actual page count from pg_class for accurate tracking
 		actualPages, err := db.GetTablePages(tableName)
 		if err != nil {
-			clearProgress()
+			clearProgress(db)
 			return fmt.Errorf("failed to get actual page count: %w", err)
 		}
 
@@ -382,11 +398,10 @@ func (db *DB) CompactTable(tableName string, initialBloatPages int) error {
 							chunkSize = pagesLeft
 						}
 						unblockRound++
-						printProgress(tableName, passNumber, unblockRound, float64(actualPages-pagesLeft)/float64(actualPages)*100, pagesLeft,
-							passesWithoutImprovement, maxStagnationPasses, unblockAttempts, maxUnblockAttempts, "Unblocking...")
+						printProgress(db, tableName, passNumber)
 
 						if err := db.RunQwashFilledPages(tableName, chunkSize); err != nil {
-							clearProgress()
+							clearProgress(db)
 							return fmt.Errorf("unblock operation failed: %w", err)
 						}
 						pagesLeft -= chunkSize
@@ -394,7 +409,7 @@ func (db *DB) CompactTable(tableName string, initialBloatPages int) error {
 						// VACUUM after each chunk
 						_, err := db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s;", sanitizeTableName(tableName)))
 						if err != nil {
-							clearProgress()
+							clearProgress(db)
 							return fmt.Errorf("VACUUM during unblock failed: %w", err)
 						}
 					}
@@ -471,13 +486,11 @@ func (db *DB) CompactTable(tableName string, initialBloatPages int) error {
 			}
 
 			// Progress indicator (updates in place)
-			percentDone := float64(bloatPages-pagesRemaining) / float64(bloatPages) * 100
-			printProgress(tableName, passNumber, roundNumber+1, percentDone, pagesRemaining,
-				passesWithoutImprovement, maxStagnationPasses, unblockAttempts, maxUnblockAttempts, "Compacting...")
+			printProgress(db, tableName, passNumber)
 
 			// Execute qwash on pagesThisRound pages
 			if err := db.RunQwash(tableName, pagesThisRound); err != nil {
-				clearProgress()
+				clearProgress(db)
 				return fmt.Errorf("RunQwash failed at pass %d, round %d: %w", passNumber, roundNumber+1, err)
 			}
 
@@ -490,16 +503,15 @@ func (db *DB) CompactTable(tableName string, initialBloatPages int) error {
 			// 2. Update FSM so next round's INSERT can use freed space
 			_, err := db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s;", sanitizeTableName(tableName)))
 			if err != nil {
-				clearProgress()
+				clearProgress(db)
 				return fmt.Errorf("VACUUM failed at pass %d, round %d: %w", passNumber, roundNumber, err)
 			}
 		}
 
-		clearProgress()
-		// Go to line 2, print pass completion, go back to line 1
-		fmt.Print("\n")                                                                      // go to line 2
-		fmt.Printf("\r\033[K✅ Pass %d done | %d rounds | %d pages", passNumber, roundNumber, actualPages) // update line 2
-		fmt.Print("\033[A\r")                                                                // back to start of line 1
+		clearProgress(db)
+		if db.Verbose {
+			fmt.Printf("  Pass %d: %d rounds, %d pages\n", passNumber, roundNumber, actualPages)
+		}
 
 		// Run ANALYZE after each pass to update statistics for next bloat check
 		_, err = db.conn.Exec(ctx, fmt.Sprintf("ANALYZE %s;", sanitizeTableName(tableName)))
@@ -509,8 +521,6 @@ func (db *DB) CompactTable(tableName string, initialBloatPages int) error {
 	}
 
 	// Final VACUUM to truncate empty trailing pages
-	fmt.Print("\n\n") // go past line 2 to line 3
-	fmt.Println("🧹 Running final VACUUM...")
 	_, err = db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s;", sanitizeTableName(tableName)))
 	if err != nil {
 		return fmt.Errorf("final VACUUM failed: %w", err)
@@ -518,8 +528,10 @@ func (db *DB) CompactTable(tableName string, initialBloatPages int) error {
 
 	// Get final page count
 	finalPages, _ := db.GetTablePages(tableName)
-	fmt.Printf("🎯 Compaction: %d → %d pages (%d passes, %d rounds)\n",
-		initialActualPages, finalPages, passNumber, totalRounds)
+	if db.Verbose {
+		fmt.Printf("  Done: %d -> %d pages (%d passes, %d rounds)\n",
+			initialActualPages, finalPages, passNumber, totalRounds)
+	}
 	return nil
 }
 
@@ -713,11 +725,11 @@ func (db *DB) CompactTableFast(tableName string, initialBloatPages int) error {
 	const targetBloatPct = 10.0   // Fast: stop when bloat < 10%
 	unblockAttempts := 0
 
-	fmt.Printf("\n🚀 Starting FAST compaction for table '%s' (target: <%.0f%% bloat)\n", tableName, targetBloatPct)
-	fmt.Printf("📦 Initial bloat: %d pages\n", initialBloatPages)
+	if db.Verbose {
+		fmt.Printf("FAST compacting '%s' (%d bloat pages, target <%.0f%%)...\n", tableName, initialBloatPages, targetBloatPct)
+	}
 
 	// VACUUM once at the beginning
-	fmt.Println("🧹 Running initial VACUUM...")
 	_, err = db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s;", sanitizeTableName(tableName)))
 	if err != nil {
 		return fmt.Errorf("initial VACUUM failed: %w", err)
@@ -778,8 +790,7 @@ func (db *DB) CompactTableFast(tableName string, initialBloatPages int) error {
 							chunkSize = pagesLeft
 						}
 						unblockRound++
-						printProgress(tableName, passNumber, unblockRound, float64(actualPages-pagesLeft)/float64(actualPages)*100, pagesLeft,
-							passesWithoutImprovement, maxStagnationPasses, unblockAttempts, maxUnblockAttempts, "Unblocking...")
+						printProgress(db, tableName, passNumber)
 
 						if err := db.RunQwashFilledPages(tableName, chunkSize); err != nil {
 							return fmt.Errorf("unblock operation failed: %w", err)
@@ -845,13 +856,11 @@ func (db *DB) CompactTableFast(tableName string, initialBloatPages int) error {
 			}
 
 			// Progress indicator (updates in place)
-			percentDone := float64(bloatPages-pagesRemaining) / float64(bloatPages) * 100
-			printProgress(tableName, passNumber, roundNumber+1, percentDone, pagesRemaining,
-				passesWithoutImprovement, maxStagnationPasses, unblockAttempts, maxUnblockAttempts, "Compacting...")
+			printProgress(db, tableName, passNumber)
 
 			// Execute qwash
 			if err := db.RunQwash(tableName, pagesThisRound); err != nil {
-				clearProgress()
+				clearProgress(db)
 				return fmt.Errorf("RunQwash failed at pass %d, round %d: %w", passNumber, roundNumber+1, err)
 			}
 
@@ -865,18 +874,17 @@ func (db *DB) CompactTableFast(tableName string, initialBloatPages int) error {
 			if roundsSinceLastVacuum >= vacuumThreshold || pagesRemaining == 0 {
 				_, err := db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s;", sanitizeTableName(tableName)))
 				if err != nil {
-					clearProgress()
+					clearProgress(db)
 					return fmt.Errorf("VACUUM failed: %w", err)
 				}
 				roundsSinceLastVacuum = 0
 			}
 		}
 
-		clearProgress()
-		// Go to line 2, print pass completion, go back to line 1
-		fmt.Print("\n")
-		fmt.Printf("\r\033[K✅ Pass %d done | %d rounds | %d pages", passNumber, roundNumber, actualPages)
-		fmt.Print("\033[A\r")
+		clearProgress(db)
+		if db.Verbose {
+			fmt.Printf("  Pass %d: %d rounds, %d pages\n", passNumber, roundNumber, actualPages)
+		}
 
 		_, err = db.conn.Exec(ctx, fmt.Sprintf("ANALYZE %s;", sanitizeTableName(tableName)))
 		if err != nil {
@@ -885,16 +893,16 @@ func (db *DB) CompactTableFast(tableName string, initialBloatPages int) error {
 	}
 
 	// Final VACUUM
-	fmt.Print("\n\n")
-	fmt.Println("🧹 Running final VACUUM...")
 	_, err = db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s;", sanitizeTableName(tableName)))
 	if err != nil {
 		return fmt.Errorf("final VACUUM failed: %w", err)
 	}
 
 	finalPages, _ := db.GetTablePages(tableName)
-	fmt.Printf("🎯 FAST compaction: %d → %d pages (%d passes, %d rounds)\n",
-		initialActualPages, finalPages, passNumber, totalRounds)
+	if db.Verbose {
+		fmt.Printf("  Done: %d -> %d pages (%d passes, %d rounds)\n",
+			initialActualPages, finalPages, passNumber, totalRounds)
+	}
 	return nil
 }
 
@@ -921,11 +929,11 @@ func (db *DB) CompactTableSlow(tableName string, initialBloatPages int, delayMs 
 		return fmt.Errorf("failed to get initial page count: %w", err)
 	}
 
-	fmt.Printf("\n🐢 Starting SLOW compaction for table '%s' (1 page at a time, %dms delay)\n", tableName, delayMs)
-	fmt.Printf("📦 Initial bloat: %d pages\n", initialBloatPages)
+	if db.Verbose {
+		fmt.Printf("SLOW compacting '%s' (%d bloat pages, %dms delay)...\n", tableName, initialBloatPages, delayMs)
+	}
 
 	// VACUUM once at the beginning to establish clean baseline
-	fmt.Println("🧹 Running initial VACUUM...")
 	_, err = db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s;", sanitizeTableName(tableName)))
 	if err != nil {
 		return fmt.Errorf("initial VACUUM failed: %w", err)
@@ -946,20 +954,20 @@ func (db *DB) CompactTableSlow(tableName string, initialBloatPages int, delayMs 
 		// Run ANALYZE to refresh statistics
 		_, err := db.conn.Exec(ctx, fmt.Sprintf("ANALYZE %s;", sanitizeTableName(tableName)))
 		if err != nil {
-			clearProgress()
+			clearProgress(db)
 			return fmt.Errorf("ANALYZE failed at pass %d: %w", passNumber, err)
 		}
 
 		// Recalculate bloat
 		bloatPages, err := db.GetBloatPages(tableName)
 		if err != nil {
-			clearProgress()
+			clearProgress(db)
 			return fmt.Errorf("failed to calculate bloat at pass %d: %w", passNumber, err)
 		}
 
 		actualPages, err := db.GetTablePages(tableName)
 		if err != nil {
-			clearProgress()
+			clearProgress(db)
 			return fmt.Errorf("failed to get actual page count: %w", err)
 		}
 
@@ -985,11 +993,10 @@ func (db *DB) CompactTableSlow(tableName string, initialBloatPages int, delayMs 
 					unblockRound := 0
 					for pagesLeft > 0 {
 						unblockRound++
-						printProgress(tableName, passNumber, unblockRound, float64(actualPages-pagesLeft)/float64(actualPages)*100, pagesLeft,
-							passesWithoutImprovement, maxStagnationPasses, unblockAttempts, maxUnblockAttempts, "Unblocking...")
+						printProgress(db, tableName, passNumber)
 
 						if err := db.RunQwashFilledPages(tableName, 1); err != nil {
-							clearProgress()
+							clearProgress(db)
 							return fmt.Errorf("unblock operation failed: %w", err)
 						}
 						pagesLeft--
@@ -997,7 +1004,7 @@ func (db *DB) CompactTableSlow(tableName string, initialBloatPages int, delayMs 
 						// VACUUM after each page
 						_, err := db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s;", sanitizeTableName(tableName)))
 						if err != nil {
-							clearProgress()
+							clearProgress(db)
 							return fmt.Errorf("VACUUM during unblock failed: %w", err)
 						}
 
@@ -1022,13 +1029,11 @@ func (db *DB) CompactTableSlow(tableName string, initialBloatPages int, delayMs 
 			pagesThisRound := 1
 
 			// Progress indicator
-			percentDone := float64(bloatPages-pagesRemaining) / float64(bloatPages) * 100
-			printProgress(tableName, passNumber, roundNumber+1, percentDone, pagesRemaining,
-				passesWithoutImprovement, maxStagnationPasses, unblockAttempts, maxUnblockAttempts, "Compacting...")
+			printProgress(db, tableName, passNumber)
 
 			// Execute qwash on 1 page
 			if err := db.RunQwash(tableName, pagesThisRound); err != nil {
-				clearProgress()
+				clearProgress(db)
 				return fmt.Errorf("RunQwash failed at pass %d, round %d: %w", passNumber, roundNumber+1, err)
 			}
 
@@ -1039,7 +1044,7 @@ func (db *DB) CompactTableSlow(tableName string, initialBloatPages int, delayMs 
 			// VACUUM after each page
 			_, err := db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s;", sanitizeTableName(tableName)))
 			if err != nil {
-				clearProgress()
+				clearProgress(db)
 				return fmt.Errorf("VACUUM failed at pass %d, round %d: %w", passNumber, roundNumber, err)
 			}
 
@@ -1047,10 +1052,10 @@ func (db *DB) CompactTableSlow(tableName string, initialBloatPages int, delayMs 
 			time.Sleep(delay)
 		}
 
-		clearProgress()
-		fmt.Print("\n")
-		fmt.Printf("\r\033[K✅ Pass %d done | %d rounds | %d pages", passNumber, roundNumber, actualPages)
-		fmt.Print("\033[A\r")
+		clearProgress(db)
+		if db.Verbose {
+			fmt.Printf("  Pass %d: %d rounds, %d pages\n", passNumber, roundNumber, actualPages)
+		}
 
 		// Run ANALYZE after each pass
 		_, err = db.conn.Exec(ctx, fmt.Sprintf("ANALYZE %s;", sanitizeTableName(tableName)))
@@ -1060,16 +1065,16 @@ func (db *DB) CompactTableSlow(tableName string, initialBloatPages int, delayMs 
 	}
 
 	// Final VACUUM
-	fmt.Print("\n\n")
-	fmt.Println("🧹 Running final VACUUM...")
 	_, err = db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s;", sanitizeTableName(tableName)))
 	if err != nil {
 		return fmt.Errorf("final VACUUM failed: %w", err)
 	}
 
 	finalPages, _ := db.GetTablePages(tableName)
-	fmt.Printf("🎯 SLOW compaction: %d → %d pages (%d passes, %d rounds)\n",
-		initialActualPages, finalPages, passNumber, totalRounds)
+	if db.Verbose {
+		fmt.Printf("  Done: %d -> %d pages (%d passes, %d rounds)\n",
+			initialActualPages, finalPages, passNumber, totalRounds)
+	}
 	return nil
 }
 
@@ -1081,11 +1086,15 @@ func (db *DB) ReindexTable(tableName string) error {
 	// It rebuilds indexes without blocking writes
 	query := fmt.Sprintf("REINDEX TABLE CONCURRENTLY %s", sanitizeTableName(tableName))
 
-	fmt.Printf("🔧 Running REINDEX CONCURRENTLY on %s...\n", tableName)
+	if db.Verbose {
+		fmt.Printf("  Reindexing %s...\n", tableName)
+	}
 	_, err := db.conn.Exec(ctx, query)
 	if err != nil {
 		// If CONCURRENTLY fails (e.g., PG < 12), try regular REINDEX
-		fmt.Println("⚠️  REINDEX CONCURRENTLY failed, trying regular REINDEX...")
+		if db.Verbose {
+			fmt.Println("  REINDEX CONCURRENTLY failed, trying regular REINDEX...")
+		}
 		query = fmt.Sprintf("REINDEX TABLE %s", sanitizeTableName(tableName))
 		_, err = db.conn.Exec(ctx, query)
 		if err != nil {
@@ -1093,6 +1102,5 @@ func (db *DB) ReindexTable(tableName string) error {
 		}
 	}
 
-	fmt.Printf("✅ REINDEX complete for %s\n", tableName)
 	return nil
 }

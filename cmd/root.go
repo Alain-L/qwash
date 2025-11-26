@@ -8,6 +8,9 @@ import (
 	"qwash/analysis"
 	"qwash/db"
 	"qwash/output"
+	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -35,12 +38,13 @@ var (
 	detailFlag   bool // --detail (-D)
 
 	// Debloat options
-	debloatFlag bool // --debloat (-B)
-	fastFlag    bool // --fast
-	slowFlag    bool // --slow (1 page at a time with delay, like pgcompacttable)
-	delayMs     int  // --delay (milliseconds between operations in slow mode)
-	dryRunFlag  bool // --dry-run
-	reindexFlag bool // --reindex
+	debloatFlag bool   // --debloat (-B)
+	fastFlag    bool   // --fast
+	slowFlag    bool   // --slow (1 page at a time with delay, like pgcompacttable)
+	delayMs     int    // --delay (milliseconds between operations in slow mode)
+	dryRunFlag  bool   // --dry-run
+	reindexFlag bool   // --reindex
+	limitStr    string // --limit (stop after reducing X bloat: 500MB, 1GB, 50%)
 
 	// Output options
 	verboseFlag bool // --verbose
@@ -112,6 +116,8 @@ func init() {
 		"Show what would be done without making changes")
 	rootCmd.PersistentFlags().BoolVar(&reindexFlag, "reindex", false,
 		"Rebuild indexes after debloat (REINDEX CONCURRENTLY)")
+	rootCmd.PersistentFlags().StringVar(&limitStr, "limit", "",
+		"Stop after reducing X bloat (e.g., 500MB, 1GB, 50%)")
 
 	// Output options
 	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false,
@@ -163,6 +169,17 @@ func executeAnalysis(cmd *cobra.Command, args []string) {
 	}
 	if delayMs > 10000 {
 		log.Fatalf("[ERROR] --delay must be <= 10000ms (got %d). Use lower values for reasonable performance.", delayMs)
+	}
+
+	// Validate --limit value (early validation before DB connection)
+	if limitStr != "" {
+		if _, _, err := parseLimit(limitStr); err != nil {
+			log.Fatalf("[ERROR] Invalid --limit value: %v", err)
+		}
+		// --limit requires --debloat
+		if !debloatFlag {
+			log.Fatalf("[ERROR] --limit requires --debloat (-B).")
+		}
 	}
 
 	// Require at least one mode
@@ -251,12 +268,44 @@ func runEstimate(connection *db.DB) {
 		log.Fatalf("Failed to analyze table bloat: %v", err)
 	}
 
+	// Filter by specific tables if -t is provided
+	if len(targetTables) > 0 {
+		filtered := filterTablesByName(tableBloat, targetTables)
+		if len(filtered) == 0 {
+			fmt.Printf("No matching tables found for: %v\n", targetTables)
+			return
+		}
+		// Detailed view for specific tables
+		if jsonFlag {
+			output.PrintBloatJSON(filtered, nil)
+		} else {
+			output.PrintDetailedBloat(filtered)
+		}
+		return
+	}
+
 	// Display results based on output format
 	if jsonFlag {
 		output.PrintBloatJSON(tableBloat, nil)
 	} else {
 		output.PrintBloatSummary(tableBloat, nil)
 	}
+}
+
+// filterTablesByName filters bloat tables by name (supports schema.table or just table)
+func filterTablesByName(tables []analysis.BloatTable, targetNames []string) []analysis.BloatTable {
+	var result []analysis.BloatTable
+	for _, tbl := range tables {
+		fullName := fmt.Sprintf("%s.%s", tbl.Schema, tbl.TableName)
+		for _, target := range targetNames {
+			// Match full name (schema.table) or just table name
+			if fullName == target || tbl.TableName == target {
+				result = append(result, tbl)
+				break
+			}
+		}
+	}
+	return result
 }
 
 // runDebloat executes the bloat reduction process
@@ -275,12 +324,25 @@ func runDebloat(connection *db.DB) {
 		}
 	}
 
-	// Show mode
-	if dryRunFlag {
+	// Parse limit if specified
+	limitBytes, limitPercent, err := parseLimit(limitStr)
+	if err != nil {
+		log.Fatalf("[ERROR] Invalid --limit value: %v", err)
+	}
+
+	// Show mode (verbose only, except dry-run which is always shown in text mode)
+	if dryRunFlag && !jsonFlag {
 		fmt.Println("DRY-RUN MODE: No changes will be made")
 	}
-	if fastFlag {
-		fmt.Println("FAST MODE: Using adaptive vacuum (~99% efficiency)")
+	if verboseFlag {
+		if fastFlag {
+			fmt.Println("FAST MODE: Using adaptive vacuum")
+		}
+		if limitBytes > 0 {
+			fmt.Printf("LIMIT: %s\n", output.FormatSize(limitBytes))
+		} else if limitPercent > 0 {
+			fmt.Printf("LIMIT: %.1f%% of total bloat\n", limitPercent)
+		}
 	}
 
 	// Get list of tables to process
@@ -294,38 +356,88 @@ func runDebloat(connection *db.DB) {
 		return
 	}
 
-	if verboseFlag || dryRunFlag {
+	if verboseFlag {
 		fmt.Printf("Tables to process: %d\n", len(tables))
 		for _, t := range tables {
 			fmt.Printf("  - %s\n", t)
 		}
 	}
 
+	// Calculate total bloat (needed for percentage display and percentage-based limits)
+	var totalBloat int64
+	for _, table := range tables {
+		bloatPages, err := connection.GetBloatPages(table)
+		if err == nil && bloatPages > 0 {
+			totalBloat += int64(bloatPages) * 8192 // Convert pages to bytes (8KB per page)
+		}
+	}
+	if limitPercent > 0 && totalBloat > 0 {
+		limitBytes = int64(float64(totalBloat) * limitPercent / 100.0)
+		if verboseFlag {
+			fmt.Printf("  Total bloat detected: %s, limit set to %s\n",
+				output.FormatSize(totalBloat), output.FormatSize(limitBytes))
+		}
+	}
+
 	// Process each table
 	var results []debloatResult
-	for _, table := range tables {
+	var totalBloatRemoved int64
+	limitReached := false
+	startTime := time.Now()
+
+	// Set total tables for progress display
+	connection.TotalTables = len(tables)
+	// Suppress progress output for JSON mode
+	connection.SilentProgress = jsonFlag
+
+	for i, table := range tables {
+		// Check if limit is reached
+		if limitBytes > 0 && totalBloatRemoved >= limitBytes {
+			if verboseFlag {
+				fmt.Printf("  %s: skipped (limit reached)\n", table)
+			}
+			limitReached = true
+			break
+		}
+
+		// Set current table index for progress display
+		connection.CurrentTableIndex = i
+
 		result := processTable(connection, table)
 		results = append(results, result)
+
+		// Update total bloat removed (convert pages to bytes)
+		if result.BloatRemoved > 0 {
+			totalBloatRemoved += int64(result.BloatRemoved) * 8192
+		}
+
+		// Clear progress line after each table
+		if !verboseFlag && !dryRunFlag && !jsonFlag {
+			fmt.Print("\r\033[K")
+		}
 	}
+
+	totalDuration := time.Since(startTime)
 
 	// Output results
 	if jsonFlag {
-		printDebloatJSON(results)
+		printDebloatJSON(results, totalDuration, limitReached)
 	} else {
-		printDebloatSummary(results)
+		printDebloatSummary(results, totalDuration, limitReached, totalBloat)
 	}
 }
 
 // debloatResult holds the result of debloating a single table
 type debloatResult struct {
-	Table        string        `json:"table"`
-	InitialPages int           `json:"initial_pages"`
-	FinalPages   int           `json:"final_pages"`
-	BloatRemoved int           `json:"bloat_removed"`
-	Duration     time.Duration `json:"duration_ms"`
-	Reindexed    bool          `json:"reindexed,omitempty"`
-	Error        string        `json:"error,omitempty"`
-	DryRun       bool          `json:"dry_run,omitempty"`
+	Table             string `json:"table"`
+	InitialPages      int    `json:"initial_pages"`
+	FinalPages        int    `json:"final_pages"`
+	BloatRemoved      int    `json:"bloat_removed_pages"`
+	BloatRemovedBytes int64  `json:"bloat_removed_bytes"`
+	DurationMs        int64  `json:"duration_ms"`
+	Reindexed         bool   `json:"reindexed,omitempty"`
+	Error             string `json:"error,omitempty"`
+	DryRun            bool   `json:"dry_run,omitempty"`
 }
 
 // getTargetTables returns the list of tables to debloat based on flags
@@ -373,10 +485,12 @@ func processTable(connection *db.DB, table string) debloatResult {
 
 	if dryRunFlag {
 		// Dry-run: just show what would happen
-		fmt.Printf("  %s: would compact %d bloat pages (current: %d pages)\n",
-			table, bloatPages, initialPages)
-		if reindexFlag {
-			fmt.Printf("  %s: would reindex after compaction\n", table)
+		if verboseFlag {
+			fmt.Printf("  %s: would compact %d bloat pages (current: %d pages)\n",
+				table, bloatPages, initialPages)
+			if reindexFlag {
+				fmt.Printf("  %s: would reindex after compaction\n", table)
+			}
 		}
 		result.FinalPages = initialPages - bloatPages // estimated
 		result.BloatRemoved = bloatPages
@@ -384,7 +498,9 @@ func processTable(connection *db.DB, table string) debloatResult {
 	}
 
 	// Actually compact the table
-	fmt.Printf("  %s: compacting...\n", table)
+	if verboseFlag {
+		fmt.Printf("  %s: compacting %d pages...\n", table, bloatPages)
+	}
 	var compactErr error
 	if fastFlag {
 		compactErr = connection.CompactTableFast(table, bloatPages)
@@ -403,10 +519,13 @@ func processTable(connection *db.DB, table string) debloatResult {
 	finalPages, _ := connection.GetTablePages(table)
 	result.FinalPages = finalPages
 	result.BloatRemoved = initialPages - finalPages
+	result.BloatRemovedBytes = int64(result.BloatRemoved) * 8192
 
 	// Reindex if requested
 	if reindexFlag {
-		fmt.Printf("  %s: reindexing...\n", table)
+		if verboseFlag {
+			fmt.Printf("  %s: reindexing...\n", table)
+		}
 		if err := connection.ReindexTable(table); err != nil {
 			result.Error = fmt.Sprintf("reindex failed: %v", err)
 		} else {
@@ -414,59 +533,255 @@ func processTable(connection *db.DB, table string) debloatResult {
 		}
 	}
 
-	result.Duration = time.Since(startTime)
+	result.DurationMs = time.Since(startTime).Milliseconds()
 	return result
 }
 
-// printDebloatSummary prints a text summary of debloat results
-func printDebloatSummary(results []debloatResult) {
-	fmt.Println()
-	fmt.Println("Debloat Summary:")
-	fmt.Println("================")
-
-	var totalRemoved int
-	var totalDuration time.Duration
+// printDebloatSummary prints a quellog-style summary of debloat results
+func printDebloatSummary(results []debloatResult, totalDuration time.Duration, limitReached bool, initialBloat int64) {
+	var totalPagesRemoved int
+	var totalBytesRemoved int64
+	var tablesCompacted int
 	var errors int
+	var errorList []debloatResult
 
 	for _, r := range results {
-		totalDuration += r.Duration
 		if r.Error != "" {
-			fmt.Printf("  %s: ERROR - %s\n", r.Table, r.Error)
 			errors++
+			errorList = append(errorList, r)
 		} else if r.BloatRemoved > 0 {
-			fmt.Printf("  %s: %d pages removed (%d -> %d) in %s\n",
-				r.Table, r.BloatRemoved, r.InitialPages, r.FinalPages, r.Duration.Round(time.Millisecond))
-			totalRemoved += r.BloatRemoved
+			totalPagesRemoved += r.BloatRemoved
+			totalBytesRemoved += int64(r.BloatRemoved) * 8192
+			tablesCompacted++
 		}
 	}
 
+	// Header
+	tableWord := "tables"
+	if len(results) == 1 {
+		tableWord = "table"
+	}
+	if len(results) > 0 && results[0].DryRun {
+		fmt.Printf("qwash – dry-run on %d %s\n\n", len(results), tableWord)
+	} else {
+		fmt.Printf("qwash – %d %s processed\n\n", len(results), tableWord)
+	}
+
+	// Summary section
+	fmt.Println(bold("SUMMARY"))
 	fmt.Println()
-	fmt.Printf("Total: %d pages removed from %d tables in %s", totalRemoved, len(results)-errors, totalDuration.Round(time.Millisecond))
+	fmt.Printf("  Tables processed          : %d\n", len(results))
+	// Mode
+	modeName := "default"
+	if fastFlag {
+		modeName = "fast"
+	} else if slowFlag {
+		modeName = "slow"
+	}
+	if dryRunFlag {
+		modeName += " dry-run"
+	}
+	fmt.Printf("  Mode                      : %s\n", modeName)
 	if errors > 0 {
-		fmt.Printf(" (%d errors)", errors)
+		fmt.Printf("  Errors                    : %d\n", errors)
+	}
+	// Bloat removed with percentage
+	if initialBloat > 0 {
+		remainingBloat := initialBloat - totalBytesRemoved
+		if remainingBloat < 0 {
+			remainingBloat = 0
+		}
+		remainingPct := float64(remainingBloat) * 100.0 / float64(initialBloat)
+		if remainingPct < 1.0 {
+			fmt.Printf("  Bloat removed             : %s (< 1%% remaining)\n", output.FormatSize(totalBytesRemoved))
+		} else {
+			fmt.Printf("  Bloat removed             : %s (%.0f%% remaining)\n", output.FormatSize(totalBytesRemoved), remainingPct)
+		}
+	} else {
+		fmt.Printf("  Bloat removed             : %s\n", output.FormatSize(totalBytesRemoved))
+	}
+	fmt.Printf("  Duration                  : %s\n", totalDuration.Round(time.Millisecond))
+	if limitReached {
+		fmt.Printf("  Status                    : limit reached\n")
 	}
 	fmt.Println()
+
+	// Errors section (if any)
+	if len(errorList) > 0 {
+		fmt.Println(bold("ERRORS"))
+		fmt.Println()
+		for _, r := range errorList {
+			fmt.Printf("  %-40s %s\n", r.Table, r.Error)
+		}
+		fmt.Println()
+	}
+
+	// Detail section: per-table breakdown sorted by bloat removed (descending)
+	if tablesCompacted > 0 {
+		// Collect tables with bloat removed
+		var compacted []debloatResult
+		for _, r := range results {
+			if r.BloatRemoved > 0 {
+				compacted = append(compacted, r)
+			}
+		}
+
+		// Sort by bloat removed descending
+		sort.Slice(compacted, func(i, j int) bool {
+			return compacted[i].BloatRemoved > compacted[j].BloatRemoved
+		})
+
+		fmt.Println(bold("DETAIL"))
+		fmt.Println()
+		fmt.Printf("  %-40s %12s %12s %12s\n", "Table", "Before", "After", "Removed")
+		fmt.Println("  " + repeatString("-", 81))
+		for _, r := range compacted {
+			fmt.Printf("  %-40s %12s %12s %12s\n",
+				truncateString(r.Table, 40),
+				output.FormatSize(int64(r.InitialPages)*8192),
+				output.FormatSize(int64(r.FinalPages)*8192),
+				output.FormatSize(int64(r.BloatRemoved)*8192),
+			)
+		}
+		fmt.Println()
+	}
+}
+
+// truncateString truncates a string to maxLen, adding "..." if truncated
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
+}
+
+// repeatString repeats a string n times
+func repeatString(s string, count int) string {
+	result := ""
+	for i := 0; i < count; i++ {
+		result += s
+	}
+	return result
+}
+
+// bold wraps text with ANSI bold escape codes
+func bold(s string) string {
+	return "\033[1m" + s + "\033[0m"
 }
 
 // printDebloatJSON prints debloat results in JSON format
-func printDebloatJSON(results []debloatResult) {
-	// Use the output package for consistent JSON formatting
-	data := struct {
-		Results      []debloatResult `json:"results"`
-		TotalRemoved int             `json:"total_pages_removed"`
-		TablesCount  int             `json:"tables_processed"`
-	}{
-		Results:     results,
-		TablesCount: len(results),
+func printDebloatJSON(results []debloatResult, totalDuration time.Duration, limitReached bool) {
+	// Determine mode
+	mode := "default"
+	if fastFlag {
+		mode = "fast"
+	} else if slowFlag {
+		mode = "slow"
+	}
+	if dryRunFlag {
+		mode += " dry-run"
 	}
 
+	// Calculate totals
+	var totalPagesRemoved int
+	var totalBytesRemoved int64
+	var tablesCompacted int
+	var errors int
+
 	for _, r := range results {
-		data.TotalRemoved += r.BloatRemoved
+		if r.Error != "" {
+			errors++
+		} else if r.BloatRemoved > 0 {
+			totalPagesRemoved += r.BloatRemoved
+			totalBytesRemoved += r.BloatRemovedBytes
+			tablesCompacted++
+		}
 	}
+
+	data := struct {
+		Summary struct {
+			TablesProcessed   int    `json:"tables_processed"`
+			TablesCompacted   int    `json:"tables_compacted"`
+			Errors            int    `json:"errors,omitempty"`
+			Mode              string `json:"mode"`
+			TotalPagesRemoved int    `json:"total_pages_removed"`
+			TotalBytesRemoved int64  `json:"total_bytes_removed"`
+			DurationMs        int64  `json:"duration_ms"`
+			LimitReached      bool   `json:"limit_reached,omitempty"`
+		} `json:"summary"`
+		Results []debloatResult `json:"results"`
+	}{}
+
+	data.Summary.TablesProcessed = len(results)
+	data.Summary.TablesCompacted = tablesCompacted
+	data.Summary.Errors = errors
+	data.Summary.Mode = mode
+	data.Summary.TotalPagesRemoved = totalPagesRemoved
+	data.Summary.TotalBytesRemoved = totalBytesRemoved
+	data.Summary.DurationMs = totalDuration.Milliseconds()
+	data.Summary.LimitReached = limitReached
+	data.Results = results
 
 	jsonBytes, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		log.Fatalf("Failed to marshal JSON: %v", err)
 	}
 	fmt.Println(string(jsonBytes))
+}
+
+// parseLimit parses the --limit flag value and returns either:
+// - bytes limit (> 0) for size-based limits (e.g., "500MB", "1GB")
+// - percentage (0.0-100.0) for percentage-based limits (e.g., "50%")
+// Returns (bytes, percentage, error)
+func parseLimit(limitStr string) (int64, float64, error) {
+	if limitStr == "" {
+		return 0, 0, nil
+	}
+
+	limitStr = strings.TrimSpace(limitStr)
+
+	// Check for percentage
+	if strings.HasSuffix(limitStr, "%") {
+		percentStr := strings.TrimSuffix(limitStr, "%")
+		percent, err := strconv.ParseFloat(percentStr, 64)
+		if err != nil {
+			return 0, 0, fmt.Errorf("invalid percentage value: %s", limitStr)
+		}
+		if percent <= 0 || percent > 100 {
+			return 0, 0, fmt.Errorf("percentage must be between 0 and 100, got %.2f%%", percent)
+		}
+		return 0, percent, nil
+	}
+
+	// Parse size (e.g., 500MB, 1GB, 2.5GB)
+	var multiplier int64 = 1
+	var valueStr string
+
+	limitUpper := strings.ToUpper(limitStr)
+	if strings.HasSuffix(limitUpper, "GB") {
+		multiplier = 1024 * 1024 * 1024
+		valueStr = limitStr[:len(limitStr)-2]
+	} else if strings.HasSuffix(limitUpper, "MB") {
+		multiplier = 1024 * 1024
+		valueStr = limitStr[:len(limitStr)-2]
+	} else if strings.HasSuffix(limitUpper, "KB") {
+		multiplier = 1024
+		valueStr = limitStr[:len(limitStr)-2]
+	} else if strings.HasSuffix(limitUpper, "B") {
+		multiplier = 1
+		valueStr = limitStr[:len(limitStr)-1]
+	} else {
+		return 0, 0, fmt.Errorf("invalid limit format: %s (use: 500MB, 1GB, 50%%)", limitStr)
+	}
+
+	value, err := strconv.ParseFloat(valueStr, 64)
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid size value: %s", limitStr)
+	}
+	if value <= 0 {
+		return 0, 0, fmt.Errorf("limit size must be positive, got %s", limitStr)
+	}
+
+	bytes := int64(value * float64(multiplier))
+	return bytes, 0, nil
 }

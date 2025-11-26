@@ -1,0 +1,29 @@
+{
+  "tables": [
+    {
+      "schema": "public",
+      "table_name": "golden_est_multi_2",
+      "table_size": 122880,
+      "bloat_size": 73728,
+      "bloat_ratio": 60,
+      "pages": 15,
+      "min_pages": 6,
+      "live_tuples": 800,
+      "dead_tuples": 1225,
+      "fill_factor": 100
+    },
+    {
+      "schema": "public",
+      "table_name": "golden_est_multi_1",
+      "table_size": 122880,
+      "bloat_size": 32768,
+      "bloat_ratio": 26.67,
+      "pages": 15,
+      "min_pages": 11,
+      "live_tuples": 1400,
+      "dead_tuples": 545,
+      "fill_factor": 100
+    }
+  ],
+  "indexes": null
+}

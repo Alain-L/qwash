@@ -27,14 +27,14 @@ func PrintBloatSummary(tableBloat []analysis.BloatTable, indexBloat []analysis.B
 
 	// Print summary header
 	fmt.Printf("qwash – %d tables analyzed\n\n", len(tableBloat))
-	fmt.Println("SUMMARY")
+	fmt.Println(bold("SUMMARY"))
 	fmt.Println()
 	fmt.Printf("  Tables analyzed           : %d\n", len(tableBloat))
 	fmt.Printf("  Tables with bloat         : %d (%.1f%%)\n", tablesWithBloat, float64(tablesWithBloat)*100.0/float64(len(tableBloat)))
 	fmt.Println()
-	fmt.Printf("  Total database size       : %s\n", formatSize(totalDBSize))
-	fmt.Printf("  Total bloat detected      : %s (%.1f%%)\n", formatSize(totalBloatSize), totalBloatPercent)
-	fmt.Printf("  Reclaimable space         : %s\n", formatSize(totalBloatSize))
+	fmt.Printf("  Total database size       : %s\n", FormatSize(totalDBSize))
+	fmt.Printf("  Total bloat detected      : %s (%.1f%%)\n", FormatSize(totalBloatSize), totalBloatPercent)
+	fmt.Printf("  Reclaimable space         : %s\n", FormatSize(totalBloatSize))
 	fmt.Println()
 
 	// Group tables by bloat severity
@@ -56,7 +56,7 @@ func PrintBloatSummary(tableBloat []analysis.BloatTable, indexBloat []analysis.B
 
 	// Print CRITICAL bloat section
 	if len(critical) > 0 {
-		fmt.Println("CRITICAL BLOAT (≥ 50%)")
+		fmt.Println(bold("CRITICAL BLOAT") + " (≥ 50%)")
 		fmt.Println()
 		fmt.Printf("  %-40s %12s %12s %10s\n", "Table", "Size", "Bloat", "Bloat %")
 		fmt.Println("  " + repeatString("-", 81))
@@ -69,20 +69,20 @@ func PrintBloatSummary(tableBloat []analysis.BloatTable, indexBloat []analysis.B
 			}
 			fmt.Printf("  %-40s %12s %12s %9.2f%%\n",
 				tableName,
-				formatSize(tbl.TableSize),
-				formatSize(tbl.BloatSize),
+				FormatSize(tbl.TableSize),
+				FormatSize(tbl.BloatSize),
 				tbl.BloatRatio,
 			)
 			criticalBloat += tbl.BloatSize
 		}
 		fmt.Println()
-		fmt.Printf("  Total: %d tables | %s bloat reclaimable\n", len(critical), formatSize(criticalBloat))
+		fmt.Printf("  Total: %d tables | %s bloat reclaimable\n", len(critical), FormatSize(criticalBloat))
 		fmt.Println()
 	}
 
 	// Print HIGH bloat section
 	if len(high) > 0 {
-		fmt.Println("HIGH BLOAT (20-50%)")
+		fmt.Println(bold("HIGH BLOAT") + " (20-50%)")
 		fmt.Println()
 		fmt.Printf("  %-40s %12s %12s %10s\n", "Table", "Size", "Bloat", "Bloat %")
 		fmt.Println("  " + repeatString("-", 81))
@@ -95,20 +95,20 @@ func PrintBloatSummary(tableBloat []analysis.BloatTable, indexBloat []analysis.B
 			}
 			fmt.Printf("  %-40s %12s %12s %9.2f%%\n",
 				tableName,
-				formatSize(tbl.TableSize),
-				formatSize(tbl.BloatSize),
+				FormatSize(tbl.TableSize),
+				FormatSize(tbl.BloatSize),
 				tbl.BloatRatio,
 			)
 			highBloat += tbl.BloatSize
 		}
 		fmt.Println()
-		fmt.Printf("  Total: %d tables | %s bloat reclaimable\n", len(high), formatSize(highBloat))
+		fmt.Printf("  Total: %d tables | %s bloat reclaimable\n", len(high), FormatSize(highBloat))
 		fmt.Println()
 	}
 
 	// Print MEDIUM bloat section
 	if len(medium) > 0 {
-		fmt.Println("MEDIUM BLOAT (5-20%)")
+		fmt.Println(bold("MEDIUM BLOAT") + " (5-20%)")
 		fmt.Println()
 		fmt.Printf("  %-40s %12s %12s %10s\n", "Table", "Size", "Bloat", "Bloat %")
 		fmt.Println("  " + repeatString("-", 81))
@@ -121,20 +121,20 @@ func PrintBloatSummary(tableBloat []analysis.BloatTable, indexBloat []analysis.B
 			}
 			fmt.Printf("  %-40s %12s %12s %9.2f%%\n",
 				tableName,
-				formatSize(tbl.TableSize),
-				formatSize(tbl.BloatSize),
+				FormatSize(tbl.TableSize),
+				FormatSize(tbl.BloatSize),
 				tbl.BloatRatio,
 			)
 			mediumBloat += tbl.BloatSize
 		}
 		fmt.Println()
-		fmt.Printf("  Total: %d tables | %s bloat reclaimable\n", len(medium), formatSize(mediumBloat))
+		fmt.Printf("  Total: %d tables | %s bloat reclaimable\n", len(medium), FormatSize(mediumBloat))
 		fmt.Println()
 	}
 
 	// No bloat message
 	if len(critical) == 0 && len(high) == 0 && len(medium) == 0 {
-		fmt.Println("NO SIGNIFICANT BLOAT DETECTED")
+		fmt.Println(bold("NO SIGNIFICANT BLOAT DETECTED"))
 		fmt.Println()
 		fmt.Println("  All tables have bloat < 5%")
 		fmt.Println()
@@ -142,7 +142,7 @@ func PrintBloatSummary(tableBloat []analysis.BloatTable, indexBloat []analysis.B
 
 	// Display index bloat summary (if available)
 	if len(indexBloat) > 0 {
-		fmt.Println("INDEX BLOAT")
+		fmt.Println(bold("INDEX BLOAT"))
 		fmt.Println()
 		fmt.Printf("  %-40s %12s %12s %10s\n", "Index", "Size", "Bloat", "Bloat %")
 		fmt.Println("  " + repeatString("-", 81))
@@ -154,8 +154,8 @@ func PrintBloatSummary(tableBloat []analysis.BloatTable, indexBloat []analysis.B
 			}
 			fmt.Printf("  %-40s %12s %12s %9.2f%%\n",
 				indexName,
-				formatSize(idx.IndexSize),
-				formatSize(idx.BloatSize),
+				FormatSize(idx.IndexSize),
+				FormatSize(idx.BloatSize),
 				idx.BloatRatio,
 			)
 		}
@@ -168,8 +168,8 @@ func PrintBloatSummary(tableBloat []analysis.BloatTable, indexBloat []analysis.B
 	}
 }
 
-// formatSize converts bytes to human-readable format
-func formatSize(bytes int64) string {
+// FormatSize converts bytes to human-readable format
+func FormatSize(bytes int64) string {
 	const unit = 1024
 	if bytes < unit {
 		return fmt.Sprintf("%d B", bytes)
@@ -189,4 +189,38 @@ func repeatString(s string, count int) string {
 		result += s
 	}
 	return result
+}
+
+// bold wraps text with ANSI bold escape codes
+func bold(s string) string {
+	return "\033[1m" + s + "\033[0m"
+}
+
+// PrintDetailedBloat displays detailed bloat information for specific tables
+// Used when -t is combined with --estimate
+func PrintDetailedBloat(tables []analysis.BloatTable) {
+	fmt.Println()
+	fmt.Println(bold("BLOAT ESTIMATION"))
+	fmt.Println()
+
+	for i, tbl := range tables {
+		tableName := fmt.Sprintf("%s.%s", tbl.Schema, tbl.TableName)
+		fmt.Println(tableName)
+		fmt.Println()
+		fmt.Printf("  Size        : %s\n", FormatSize(tbl.TableSize))
+		fmt.Printf("  Bloat       : %s\n", FormatSize(tbl.BloatSize))
+		fmt.Printf("  Bloat %%     : %.2f%%\n", tbl.BloatRatio)
+		fmt.Printf("  Pages       : %d\n", tbl.Pages)
+		fmt.Printf("  Min pages   : %d\n", tbl.MinPages)
+		fmt.Printf("  Live tuples : %d\n", tbl.LiveTuples)
+		fmt.Printf("  Dead tuples : %d\n", tbl.DeadTuples)
+		fmt.Printf("  Fill factor : %d\n", tbl.FillFactor)
+		fmt.Println()
+
+		// Separator between tables (except for the last one)
+		if i < len(tables)-1 {
+			fmt.Println("  ---")
+			fmt.Println()
+		}
+	}
 }

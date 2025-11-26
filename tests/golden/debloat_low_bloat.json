@@ -1,0 +1,18 @@
+{
+  "summary": {
+    "tables_processed": 1,
+    "tables_compacted": 1,
+    "mode": "default",
+    "total_pages_removed": 3,
+    "total_bytes_removed": 24576
+  },
+  "results": [
+    {
+      "table": "low_bloat",
+      "initial_pages": 37,
+      "final_pages": 34,
+      "bloat_removed_pages": 3,
+      "bloat_removed_bytes": 24576
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "summary": {
+    "tables_processed": 1,
+    "tables_compacted": 1,
+    "mode": "fast",
+    "total_pages_removed": 18,
+    "total_bytes_removed": 147456
+  },
+  "results": [
+    {
+      "table": "golden_test",
+      "initial_pages": 37,
+      "final_pages": 19,
+      "bloat_removed_pages": 18,
+      "bloat_removed_bytes": 147456
+    }
+  ]
+}

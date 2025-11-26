@@ -1,0 +1,17 @@
+{
+  "tables": [
+    {
+      "schema": "public",
+      "table_name": "golden_est_single",
+      "table_size": 188416,
+      "bloat_size": 90112,
+      "bloat_ratio": 47.83,
+      "pages": 23,
+      "min_pages": 12,
+      "live_tuples": 1500,
+      "dead_tuples": 1497,
+      "fill_factor": 100
+    }
+  ],
+  "indexes": null
+}

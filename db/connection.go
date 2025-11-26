@@ -23,6 +23,11 @@ type Config struct {
 type DB struct {
 	conn    *pgx.Conn
 	Verbose bool
+	// Progress tracking for multi-table operations
+	CurrentTableIndex int
+	TotalTables       int
+	// SilentProgress suppresses progress output (for JSON mode)
+	SilentProgress bool
 }
 
 // Connect establishes a connection to PostgreSQL and returns a DB struct
