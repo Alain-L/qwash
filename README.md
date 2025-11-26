@@ -258,12 +258,12 @@ go test ./tests -run TestEstimate -v
 
 ## Comparison with Alternatives
 
-| Tool | Blocking | Extension | Extra Space | Incremental | Index Rebuild |
-|------|----------|-----------|-------------|-------------|---------------|
-| `VACUUM FULL` | Yes (exclusive lock) | No | 1x table size | No | Automatic |
-| `pg_repack` | No | Yes (pg_repack) | 1x table size | No | Automatic |
-| `pgcompacttable` | No | Yes (pgstattuple) | Minimal | Yes | Manual |
-| **qwash** | No | No | Minimal | Yes | Optional (`--reindex`) |
+| Tool | Non-blocking | No extension | In-place | Incremental |
+|------|--------------|--------------|----------|-------------|
+| `VACUUM FULL` | No | Yes | No | No |
+| `pg_repack` | Yes | No | No | No |
+| `pgcompacttable` | Yes | No | Yes | Yes |
+| **qwash** | **Yes** | **Yes** | **Yes** | **Yes** |
 
 ## References
 
