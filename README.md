@@ -141,14 +141,44 @@ This approach:
 ### Text Output (--estimate)
 
 ```
-TABLE BLOAT ANALYSIS
-====================
+qwash – 3 tables analyzed
 
-Schema   Table           Size      Bloat     Ratio
-------   -----           ----      -----     -----
-public   orders          1.2 GB    892 MB    74.3%
-public   order_items     567 MB    234 MB    41.2%
-public   customers       128 MB    12 MB     9.4%
+SUMMARY
+
+  Tables analyzed           : 3
+  Tables with bloat         : 2 (66.7%)
+
+  Total database size       : 1.9 GB
+  Total bloat detected      : 1.1 GB (57.9%)
+  Reclaimable space         : 1.1 GB
+
+CRITICAL BLOAT (≥ 50%)
+
+  Table                                            Size        Bloat    Bloat %
+  ---------------------------------------------------------------------------------
+  public.orders                                   1.2 GB     892.0 MB     74.33%
+  public.order_items                            567.0 MB     234.0 MB     41.27%
+
+  Total: 2 tables | 1.1 GB bloat reclaimable
+
+[INFO] Use --debloat to reduce bloat (modes: --fast, default, --slow)
+```
+
+### Text Output (--estimate -t table)
+
+```
+BLOAT ESTIMATION
+
+public.orders
+
+  Size        : 1.2 GB
+  Bloat       : 892.0 MB
+  Bloat %     : 74.33%
+  Pages       : 157286
+  Min pages   : 40384
+  Live tuples : 1250000
+  Dead tuples : 3750000
+  Fill factor : 100
 ```
 
 ### JSON Output (--estimate --json)
@@ -213,12 +243,17 @@ go test ./tests -run TestEstimate -v
 
 ## Comparison with Alternatives
 
-| Tool | Blocking | Extension Required | Incremental | Index Rebuild |
-|------|----------|-------------------|-------------|---------------|
-| `VACUUM FULL` | Yes (exclusive lock) | No | No | Automatic |
-| `pg_repack` | No | Yes | No | Automatic |
-| `pgcompacttable` | No | No | Yes | Manual |
-| **qwash** | No | No | Yes | Optional (`--reindex`) |
+| Tool | Blocking | Extension | Extra Space | Incremental | Index Rebuild |
+|------|----------|-----------|-------------|-------------|---------------|
+| `VACUUM FULL` | Yes (exclusive lock) | No | 1x table size | No | Automatic |
+| `pg_repack` | No | Yes (pg_repack) | 1x table size | No | Automatic |
+| `pgcompacttable` | No | Yes (pgstattuple) | Minimal | Yes | Manual |
+| **qwash** | No | No | Minimal | Yes | Optional (`--reindex`) |
+
+## References
+
+- [ioguix/pgsql-bloat-estimation](https://github.com/ioguix/pgsql-bloat-estimation) — SQL queries for bloat estimation (table_bloat.sql, btree_bloat.sql)
+- [dataegret/pgcompacttable](https://github.com/dataegret/pgcompacttable) — Perl tool for reorganizing bloated tables without locks
 
 ## License
 
