@@ -63,3 +63,6 @@ sql/_*.sql
 *.db
 *.sqlite
 *.sqlite3
+
+# Local test data and benchmarks
+testdata/
