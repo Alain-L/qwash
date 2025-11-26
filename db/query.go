@@ -3,9 +3,10 @@ package db
 import (
 	"context"
 	"fmt"
-	"qwash/sql"
 	"strings"
 	"time"
+
+	"qwash/sql"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -36,12 +37,10 @@ func printProgress(db *DB, tableName string, pass int) {
 	if db.TotalTables == 1 {
 		tableWord = "table"
 	}
-	// Truncate table name if too long for stable display
 	displayName := tableName
 	if len(displayName) > 40 {
 		displayName = displayName[:37] + "..."
 	}
-	// Fixed-width format: table name (40 chars), pass (2 digits), index/total (2/2 digits)
 	fmt.Printf("\r\033[K%-40s | Pass %2d | %2d/%2d %s",
 		displayName, pass, db.CurrentTableIndex, db.TotalTables, tableWord)
 }

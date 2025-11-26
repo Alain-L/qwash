@@ -55,6 +55,9 @@ retroengineering/
 sql/*ioguix.sql
 sql/_*.sql
 
+# Archived/experimental code
+db/query_update_archive.go
+
 
 # Log files
 *.log

@@ -1,5 +1,18 @@
 package analysis
 
+// DebloatResult holds the result of debloating a single table
+type DebloatResult struct {
+	Table             string `json:"table"`
+	InitialPages      int    `json:"initial_pages"`
+	FinalPages        int    `json:"final_pages"`
+	BloatRemoved      int    `json:"bloat_removed_pages"`
+	BloatRemovedBytes int64  `json:"bloat_removed_bytes"`
+	DurationMs        int64  `json:"duration_ms"`
+	Reindexed         bool   `json:"reindexed,omitempty"`
+	Error             string `json:"error,omitempty"`
+	DryRun            bool   `json:"dry_run,omitempty"`
+}
+
 // BloatIndex represents bloat information for an index.
 type BloatIndex struct {
 	Schema     string  `json:"schema"`
