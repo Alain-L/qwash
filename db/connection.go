@@ -22,12 +22,15 @@ type Config struct {
 // DB represents a database connection
 type DB struct {
 	conn    *pgx.Conn
+	config  Config // Store config for creating worker connections
 	Verbose bool
 	// Progress tracking for multi-table operations
 	CurrentTableIndex int
 	TotalTables       int
 	// SilentProgress suppresses progress output (for JSON mode)
 	SilentProgress bool
+	// WorkerID identifies the worker in parallel mode (0 = main/sequential)
+	WorkerID int
 }
 
 // Connect establishes a connection to PostgreSQL and returns a DB struct
@@ -48,7 +51,24 @@ func Connect(cfg Config, verbose bool) (*DB, error) {
 		log.Printf("[INFO] Successfully connected to %s at %s:%s", cfg.Database, cfg.Host, cfg.Port)
 	}
 
-	return &DB{conn: conn, Verbose: verbose}, nil
+	return &DB{conn: conn, config: cfg, Verbose: verbose}, nil
+}
+
+// NewWorkerConnection creates a new connection for a worker goroutine.
+// Each worker needs its own connection due to session-level state.
+func (db *DB) NewWorkerConnection(workerID int) (*DB, error) {
+	worker, err := Connect(db.config, false) // Workers are not verbose individually
+	if err != nil {
+		return nil, err
+	}
+	worker.WorkerID = workerID
+	worker.SilentProgress = true // Workers don't print progress directly
+	return worker, nil
+}
+
+// GetConfig returns the connection configuration (useful for parallel mode)
+func (db *DB) GetConfig() Config {
+	return db.config
 }
 
 // Close properly closes the database connection

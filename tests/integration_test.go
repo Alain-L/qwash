@@ -728,6 +728,24 @@ func TestCLIErrorDelayWithoutSlow(t *testing.T) {
 	}
 }
 
+// TestCLIErrorJobsWithoutDebloat tests that --jobs without --debloat fails
+func TestCLIErrorJobsWithoutDebloat(t *testing.T) {
+	conn := setupTestDB(t)
+	conn.Close()
+
+	output, err := runQwashCLI(t, "--estimate", "--jobs", "4")
+
+	// Should fail
+	if err == nil {
+		t.Errorf("Expected error when using --jobs without --debloat, but got success\nOutput: %s", output)
+	}
+
+	// Should mention --debloat requirement
+	if !strings.Contains(strings.ToLower(output), "debloat") {
+		t.Logf("Warning: Error message doesn't mention --debloat requirement\nOutput: %s", output)
+	}
+}
+
 // TestCLIErrorDebloatWithoutTable tests behavior when no table specified for debloat
 func TestCLIErrorDebloatWithoutTable(t *testing.T) {
 	conn := setupTestDB(t)

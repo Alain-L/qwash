@@ -4,8 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"qwash/analysis"
@@ -44,6 +47,7 @@ var (
 	dryRunFlag  bool   // --dry-run
 	reindexFlag bool   // --reindex
 	limitStr    string // --limit (stop after reducing X bloat: 500MB, 1GB, 50%)
+	jobsFlag    int    // --jobs (-j) number of parallel workers (0 = auto)
 
 	// Output options
 	verboseFlag bool // --verbose
@@ -117,6 +121,8 @@ func init() {
 		"Rebuild indexes after debloat (REINDEX CONCURRENTLY)")
 	rootCmd.PersistentFlags().StringVar(&limitStr, "limit", "",
 		"Stop after reducing X bloat (e.g., 500MB, 1GB, 50%)")
+	rootCmd.PersistentFlags().IntVarP(&jobsFlag, "jobs", "j", 0,
+		"Number of parallel workers (default: 4, or 8 with --fast)")
 
 	// Output options
 	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false,
@@ -168,6 +174,11 @@ func executeAnalysis(cmd *cobra.Command, args []string) {
 	}
 	if delayMs > 10000 {
 		log.Fatalf("[ERROR] --delay must be <= 10000ms (got %d). Use lower values for reasonable performance.", delayMs)
+	}
+
+	// --jobs requires --debloat
+	if cmd.Flags().Changed("jobs") && !debloatFlag {
+		log.Fatalf("[ERROR] --jobs (-j) requires --debloat (-B).")
 	}
 
 	// Validate --limit value (early validation before DB connection)
@@ -355,21 +366,24 @@ func runDebloat(connection *db.DB) {
 		return
 	}
 
-	if verboseFlag {
-		fmt.Printf("Tables to process: %d\n", len(tables))
-		for _, t := range tables {
-			fmt.Printf("  - %s\n", t)
-		}
-	}
-
-	// Calculate total bloat (needed for percentage display and percentage-based limits)
+	// Calculate total bloat and build map for LPT scheduling
+	// LPT (Longest Processing Time First) sorts tables by bloat size descending
+	// to optimize parallel processing - biggest tables first so smaller ones fill gaps
 	var totalBloat int64
+	tableBloatPages := make(map[string]int)
 	for _, table := range tables {
 		bloatPages, err := connection.GetBloatPages(table)
 		if err == nil && bloatPages > 0 {
 			totalBloat += int64(bloatPages) * 8192 // Convert pages to bytes (8KB per page)
+			tableBloatPages[table] = bloatPages
 		}
 	}
+
+	// Sort tables by bloat size (descending) for optimal parallel scheduling
+	sort.Slice(tables, func(i, j int) bool {
+		return tableBloatPages[tables[i]] > tableBloatPages[tables[j]]
+	})
+
 	if limitPercent > 0 && totalBloat > 0 {
 		limitBytes = int64(float64(totalBloat) * limitPercent / 100.0)
 		if verboseFlag {
@@ -378,15 +392,73 @@ func runDebloat(connection *db.DB) {
 		}
 	}
 
-	// Process each table
+	// Determine number of workers
+	numWorkers := jobsFlag
+	if numWorkers <= 0 {
+		// Default: 4 workers for default mode, 8 for fast mode
+		if fastFlag {
+			numWorkers = 8
+		} else {
+			numWorkers = 4
+		}
+	}
+	// Cap at number of tables
+	if numWorkers > len(tables) {
+		numWorkers = len(tables)
+	}
+	// Slow mode should use 1 worker (defeats purpose of being gentle otherwise)
+	if slowFlag && numWorkers > 1 {
+		if verboseFlag {
+			fmt.Println("Note: --slow mode uses single worker for minimal database impact")
+		}
+		numWorkers = 1
+	}
+
+	if verboseFlag {
+		fmt.Printf("Tables to process: %d (using %d workers)\n", len(tables), numWorkers)
+		for _, t := range tables {
+			fmt.Printf("  - %s\n", t)
+		}
+	}
+
+	startTime := time.Now()
+	var results []analysis.DebloatResult
+	var limitReached bool
+
+	if numWorkers == 1 {
+		// Sequential mode (original behavior)
+		results, limitReached = runDebloatSequential(connection, tables, limitBytes)
+	} else {
+		// Parallel mode
+		results, limitReached = runDebloatParallel(connection, tables, numWorkers, limitBytes)
+	}
+
+	totalDuration := time.Since(startTime)
+
+	// Output results
+	opts := output.DebloatOptions{
+		FastMode:     fastFlag,
+		SlowMode:     slowFlag,
+		DryRun:       dryRunFlag,
+		LimitReached: limitReached,
+		InitialBloat: totalBloat,
+		Workers:      numWorkers,
+	}
+	if jsonFlag {
+		output.PrintDebloatJSON(results, totalDuration, opts)
+	} else {
+		output.PrintDebloatSummary(results, totalDuration, opts)
+	}
+}
+
+// runDebloatSequential processes tables one at a time (original behavior)
+func runDebloatSequential(connection *db.DB, tables []string, limitBytes int64) ([]analysis.DebloatResult, bool) {
 	var results []analysis.DebloatResult
 	var totalBloatRemoved int64
 	limitReached := false
-	startTime := time.Now()
 
 	// Set total tables for progress display
 	connection.TotalTables = len(tables)
-	// Suppress progress output for JSON mode
 	connection.SilentProgress = jsonFlag
 
 	for i, table := range tables {
@@ -399,13 +471,10 @@ func runDebloat(connection *db.DB) {
 			break
 		}
 
-		// Set current table index for progress display
 		connection.CurrentTableIndex = i
-
 		result := processTable(connection, table)
 		results = append(results, result)
 
-		// Update total bloat removed (convert pages to bytes)
 		if result.BloatRemoved > 0 {
 			totalBloatRemoved += int64(result.BloatRemoved) * 8192
 		}
@@ -416,21 +485,125 @@ func runDebloat(connection *db.DB) {
 		}
 	}
 
-	totalDuration := time.Since(startTime)
+	return results, limitReached
+}
 
-	// Output results
-	opts := output.DebloatOptions{
-		FastMode:     fastFlag,
-		SlowMode:     slowFlag,
-		DryRun:       dryRunFlag,
-		LimitReached: limitReached,
-		InitialBloat: totalBloat,
+// runDebloatParallel processes tables concurrently using a worker pool
+func runDebloatParallel(connection *db.DB, tables []string, numWorkers int, limitBytes int64) ([]analysis.DebloatResult, bool) {
+	// Channels for work distribution and results
+	tableChan := make(chan string, len(tables))
+	resultChan := make(chan analysis.DebloatResult, len(tables))
+
+	// Atomic counters for progress and limit tracking
+	var tablesCompleted int64
+	var totalBloatRemoved int64
+	var limitReached int64 // 0 = false, 1 = true
+
+	// Create worker connections
+	workers := make([]*db.DB, numWorkers)
+	for i := 0; i < numWorkers; i++ {
+		worker, err := connection.NewWorkerConnection(i + 1)
+		if err != nil {
+			log.Fatalf("Failed to create worker connection %d: %v", i+1, err)
+		}
+		workers[i] = worker
 	}
-	if jsonFlag {
-		output.PrintDebloatJSON(results, totalDuration, opts)
-	} else {
-		output.PrintDebloatSummary(results, totalDuration, opts)
+	defer func() {
+		for _, w := range workers {
+			w.Close()
+		}
+	}()
+
+	// Start progress display goroutine
+	stopProgress := make(chan struct{})
+	if !jsonFlag && !verboseFlag && !dryRunFlag {
+		go func() {
+			ticker := time.NewTicker(100 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					completed := atomic.LoadInt64(&tablesCompleted)
+					printParallelProgress(int(completed), len(tables), numWorkers)
+				case <-stopProgress:
+					return
+				}
+			}
+		}()
 	}
+
+	// Start workers
+	var wg sync.WaitGroup
+	for _, worker := range workers {
+		wg.Add(1)
+		go func(w *db.DB) {
+			defer wg.Done()
+			for table := range tableChan {
+				// Check if limit reached before processing
+				if limitBytes > 0 && atomic.LoadInt64(&totalBloatRemoved) >= limitBytes {
+					atomic.StoreInt64(&limitReached, 1)
+					// Still need to report skipped tables
+					resultChan <- analysis.DebloatResult{
+						Table: table,
+						Error: "skipped (limit reached)",
+					}
+					continue
+				}
+
+				result := processTable(w, table)
+				resultChan <- result
+
+				// Update counters
+				atomic.AddInt64(&tablesCompleted, 1)
+				if result.BloatRemoved > 0 {
+					atomic.AddInt64(&totalBloatRemoved, int64(result.BloatRemoved)*8192)
+				}
+			}
+		}(worker)
+	}
+
+	// Send tables to workers
+	for _, table := range tables {
+		tableChan <- table
+	}
+	close(tableChan)
+
+	// Wait for all workers to finish
+	wg.Wait()
+	close(resultChan)
+
+	// Stop progress display
+	close(stopProgress)
+	if !jsonFlag && !verboseFlag && !dryRunFlag {
+		fmt.Print("\r\033[K") // Clear progress line
+	}
+
+	// Collect results (maintain order by table name for consistent output)
+	resultMap := make(map[string]analysis.DebloatResult)
+	for result := range resultChan {
+		resultMap[result.Table] = result
+	}
+
+	// Return results in original table order
+	results := make([]analysis.DebloatResult, 0, len(tables))
+	for _, table := range tables {
+		if result, ok := resultMap[table]; ok {
+			results = append(results, result)
+		}
+	}
+
+	return results, atomic.LoadInt64(&limitReached) == 1
+}
+
+// printParallelProgress prints progress for parallel mode
+func printParallelProgress(completed, total, workers int) {
+	// Calculate progress bar
+	barWidth := 30
+	progress := float64(completed) / float64(total)
+	filled := int(progress * float64(barWidth))
+
+	bar := strings.Repeat("=", filled) + strings.Repeat(" ", barWidth-filled)
+	fmt.Printf("\r\033[K[%s] %d/%d tables | %d workers", bar, completed, total, workers)
 }
 
 

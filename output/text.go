@@ -15,7 +15,7 @@ func PrintBloatSummary(tableBloat []analysis.BloatTable, indexBloat []analysis.B
 	for _, tbl := range tableBloat {
 		totalDBSize += tbl.TableSize
 		totalBloatSize += tbl.BloatSize
-		if tbl.BloatRatio >= 5.0 {
+		if tbl.BloatRatio >= 10.0 {
 			tablesWithBloat++
 		}
 	}
@@ -42,9 +42,9 @@ func PrintBloatSummary(tableBloat []analysis.BloatTable, indexBloat []analysis.B
 	for _, tbl := range tableBloat {
 		if tbl.BloatRatio >= 50.0 {
 			critical = append(critical, tbl)
-		} else if tbl.BloatRatio >= 20.0 {
+		} else if tbl.BloatRatio >= 30.0 {
 			high = append(high, tbl)
-		} else if tbl.BloatRatio >= 5.0 {
+		} else if tbl.BloatRatio >= 10.0 {
 			medium = append(medium, tbl)
 		}
 	}
@@ -82,7 +82,7 @@ func PrintBloatSummary(tableBloat []analysis.BloatTable, indexBloat []analysis.B
 
 	// Print HIGH bloat section
 	if len(high) > 0 {
-		fmt.Println(bold("HIGH BLOAT") + " (20-50%)")
+		fmt.Println(bold("HIGH BLOAT") + " (30-50%)")
 		fmt.Println()
 		fmt.Printf("  %-40s %12s %12s %10s\n", "Table", "Size", "Bloat", "Bloat %")
 		fmt.Println("  " + repeatString("-", 81))
@@ -108,7 +108,7 @@ func PrintBloatSummary(tableBloat []analysis.BloatTable, indexBloat []analysis.B
 
 	// Print MEDIUM bloat section
 	if len(medium) > 0 {
-		fmt.Println(bold("MEDIUM BLOAT") + " (5-20%)")
+		fmt.Println(bold("MEDIUM BLOAT") + " (10-30%)")
 		fmt.Println()
 		fmt.Printf("  %-40s %12s %12s %10s\n", "Table", "Size", "Bloat", "Bloat %")
 		fmt.Println("  " + repeatString("-", 81))
@@ -136,7 +136,7 @@ func PrintBloatSummary(tableBloat []analysis.BloatTable, indexBloat []analysis.B
 	if len(critical) == 0 && len(high) == 0 && len(medium) == 0 {
 		fmt.Println(bold("NO SIGNIFICANT BLOAT DETECTED"))
 		fmt.Println()
-		fmt.Println("  All tables have bloat < 5%")
+		fmt.Println("  All tables have bloat < 10%")
 		fmt.Println()
 	}
 
@@ -162,10 +162,6 @@ func PrintBloatSummary(tableBloat []analysis.BloatTable, indexBloat []analysis.B
 		fmt.Println()
 	}
 
-	// Helpful message
-	if tablesWithBloat > 0 {
-		fmt.Println("[INFO] Use --debloat to reduce bloat (modes: --fast, default, --slow)")
-	}
 }
 
 // FormatSize converts bytes to human-readable format

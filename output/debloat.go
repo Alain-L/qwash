@@ -16,6 +16,7 @@ type DebloatOptions struct {
 	DryRun       bool
 	LimitReached bool
 	InitialBloat int64
+	Workers      int // Number of parallel workers (1 = sequential)
 }
 
 // PrintDebloatSummary prints a text summary of debloat results
@@ -59,6 +60,9 @@ func PrintDebloatSummary(results []analysis.DebloatResult, totalDuration time.Du
 		modeName = "fast"
 	} else if opts.SlowMode {
 		modeName = "slow"
+	}
+	if opts.Workers > 1 {
+		modeName += fmt.Sprintf(" (%d workers)", opts.Workers)
 	}
 	if opts.DryRun {
 		modeName += " dry-run"
@@ -164,6 +168,7 @@ func PrintDebloatJSON(results []analysis.DebloatResult, totalDuration time.Durat
 			TablesCompacted   int    `json:"tables_compacted"`
 			Errors            int    `json:"errors,omitempty"`
 			Mode              string `json:"mode"`
+			Workers           int    `json:"workers,omitempty"`
 			TotalPagesRemoved int    `json:"total_pages_removed"`
 			TotalBytesRemoved int64  `json:"total_bytes_removed"`
 			DurationMs        int64  `json:"duration_ms"`
@@ -176,6 +181,9 @@ func PrintDebloatJSON(results []analysis.DebloatResult, totalDuration time.Durat
 	data.Summary.TablesCompacted = tablesCompacted
 	data.Summary.Errors = errors
 	data.Summary.Mode = mode
+	if opts.Workers > 1 {
+		data.Summary.Workers = opts.Workers
+	}
 	data.Summary.TotalPagesRemoved = totalPagesRemoved
 	data.Summary.TotalBytesRemoved = totalBytesRemoved
 	data.Summary.DurationMs = totalDuration.Milliseconds()

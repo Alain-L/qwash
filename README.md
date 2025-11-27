@@ -175,8 +175,6 @@ CRITICAL BLOAT (≥ 50%)
   public.order_items                            567.0 MB     234.0 MB     41.27%
 
   Total: 2 tables | 1.1 GB bloat reclaimable
-
-[INFO] Use --debloat to reduce bloat (modes: --fast, default, --slow)
 ```
 
 ### Text Output (--estimate -t table)
