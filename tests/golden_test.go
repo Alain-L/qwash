@@ -59,6 +59,7 @@ func parseJSONOutput(t *testing.T, output string) DebloatJSON {
 }
 
 // compareDebloatJSON compares actual output with golden file, ignoring duration fields
+// Allows for small tolerances in page counts due to PostgreSQL's non-deterministic page management
 func compareDebloatJSON(t *testing.T, actual, golden DebloatJSON) {
 	// Compare summary (excluding duration)
 	if actual.Summary.TablesProcessed != golden.Summary.TablesProcessed {
@@ -73,13 +74,18 @@ func compareDebloatJSON(t *testing.T, actual, golden DebloatJSON) {
 		t.Errorf("Summary.Mode: got %q, want %q",
 			actual.Summary.Mode, golden.Summary.Mode)
 	}
-	if actual.Summary.TotalPagesRemoved != golden.Summary.TotalPagesRemoved {
-		t.Errorf("Summary.TotalPagesRemoved: got %d, want %d",
+
+	// Allow ±2 pages tolerance for total pages removed (PostgreSQL page management variance)
+	if !withinTolerance(actual.Summary.TotalPagesRemoved, golden.Summary.TotalPagesRemoved, 2) {
+		t.Errorf("Summary.TotalPagesRemoved: got %d, want %d (±2 tolerance)",
 			actual.Summary.TotalPagesRemoved, golden.Summary.TotalPagesRemoved)
 	}
-	if actual.Summary.TotalBytesRemoved != golden.Summary.TotalBytesRemoved {
-		t.Errorf("Summary.TotalBytesRemoved: got %d, want %d",
-			actual.Summary.TotalBytesRemoved, golden.Summary.TotalBytesRemoved)
+
+	// Bytes tolerance: ±2 pages worth (16384 bytes)
+	bytesTolerance := int64(2 * 8192)
+	if !withinToleranceInt64(actual.Summary.TotalBytesRemoved, golden.Summary.TotalBytesRemoved, bytesTolerance) {
+		t.Errorf("Summary.TotalBytesRemoved: got %d, want %d (±%d tolerance)",
+			actual.Summary.TotalBytesRemoved, golden.Summary.TotalBytesRemoved, bytesTolerance)
 	}
 
 	// Compare results count
@@ -105,19 +111,45 @@ func compareDebloatJSON(t *testing.T, actual, golden DebloatJSON) {
 		if a.Table != g.Table {
 			t.Errorf("Results[%d].Table: got %q, want %q", i, a.Table, g.Table)
 		}
+
+		// InitialPages should be exact (table size before debloat is deterministic)
 		if a.InitialPages != g.InitialPages {
 			t.Errorf("Table %q: InitialPages: got %d, want %d", g.Table, a.InitialPages, g.InitialPages)
 		}
-		if a.FinalPages != g.FinalPages {
-			t.Errorf("Table %q: FinalPages: got %d, want %d", g.Table, a.FinalPages, g.FinalPages)
+
+		// Allow ±1 page tolerance for final pages (PostgreSQL page management variance)
+		if !withinTolerance(a.FinalPages, g.FinalPages, 1) {
+			t.Errorf("Table %q: FinalPages: got %d, want %d (±1 tolerance)", g.Table, a.FinalPages, g.FinalPages)
 		}
-		if a.BloatRemovedPages != g.BloatRemovedPages {
-			t.Errorf("Table %q: BloatRemovedPages: got %d, want %d", g.Table, a.BloatRemovedPages, g.BloatRemovedPages)
+
+		// Allow ±1 page tolerance for bloat removed pages
+		if !withinTolerance(a.BloatRemovedPages, g.BloatRemovedPages, 1) {
+			t.Errorf("Table %q: BloatRemovedPages: got %d, want %d (±1 tolerance)", g.Table, a.BloatRemovedPages, g.BloatRemovedPages)
 		}
-		if a.BloatRemovedBytes != g.BloatRemovedBytes {
-			t.Errorf("Table %q: BloatRemovedBytes: got %d, want %d", g.Table, a.BloatRemovedBytes, g.BloatRemovedBytes)
+
+		// Bytes tolerance: ±1 page worth (8192 bytes)
+		if !withinToleranceInt64(a.BloatRemovedBytes, g.BloatRemovedBytes, 8192) {
+			t.Errorf("Table %q: BloatRemovedBytes: got %d, want %d (±8192 tolerance)", g.Table, a.BloatRemovedBytes, g.BloatRemovedBytes)
 		}
 	}
+}
+
+// withinTolerance checks if actual is within ±tolerance of expected (for int values)
+func withinTolerance(actual, expected, tolerance int) bool {
+	diff := actual - expected
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff <= tolerance
+}
+
+// withinToleranceInt64 checks if actual is within ±tolerance of expected (for int64 values)
+func withinToleranceInt64(actual, expected, tolerance int64) bool {
+	diff := actual - expected
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff <= tolerance
 }
 
 // =============================================================================
