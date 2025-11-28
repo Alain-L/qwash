@@ -3,8 +3,8 @@
     "tables_processed": 3,
     "tables_compacted": 3,
     "mode": "default",
-    "total_pages_removed": 34,
-    "total_bytes_removed": 278528
+    "total_pages_removed": 33,
+    "total_bytes_removed": 270336
   },
   "results": [
     {
@@ -24,9 +24,9 @@
     {
       "table": "multi_3",
       "initial_pages": 23,
-      "final_pages": 7,
-      "bloat_removed_pages": 16,
-      "bloat_removed_bytes": 131072
+      "final_pages": 8,
+      "bloat_removed_pages": 15,
+      "bloat_removed_bytes": 122880
     }
   ]
 }
