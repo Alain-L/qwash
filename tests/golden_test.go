@@ -88,25 +88,46 @@ func compareDebloatJSON(t *testing.T, actual, golden DebloatJSON) {
 		return
 	}
 
-	// Compare each result (excluding duration)
-	for i := range golden.Results {
-		a := actual.Results[i]
-		g := golden.Results[i]
-
-		if a.Table != g.Table {
-			t.Errorf("Results[%d].Table: got %q, want %q", i, a.Table, g.Table)
+	// Build map of actual results by table name for order-independent comparison
+	actualMap := make(map[string]struct {
+		InitialPages      int
+		FinalPages        int
+		BloatRemovedPages int
+		BloatRemovedBytes int64
+	})
+	for _, r := range actual.Results {
+		actualMap[r.Table] = struct {
+			InitialPages      int
+			FinalPages        int
+			BloatRemovedPages int
+			BloatRemovedBytes int64
+		}{
+			InitialPages:      r.InitialPages,
+			FinalPages:        r.FinalPages,
+			BloatRemovedPages: r.BloatRemovedPages,
+			BloatRemovedBytes: r.BloatRemovedBytes,
 		}
+	}
+
+	// Compare each result from golden with actual (order-independent)
+	for _, g := range golden.Results {
+		a, found := actualMap[g.Table]
+		if !found {
+			t.Errorf("Table %q: not found in actual results", g.Table)
+			continue
+		}
+
 		if a.InitialPages != g.InitialPages {
-			t.Errorf("Results[%d].InitialPages: got %d, want %d", i, a.InitialPages, g.InitialPages)
+			t.Errorf("Table %q: InitialPages: got %d, want %d", g.Table, a.InitialPages, g.InitialPages)
 		}
 		if a.FinalPages != g.FinalPages {
-			t.Errorf("Results[%d].FinalPages: got %d, want %d", i, a.FinalPages, g.FinalPages)
+			t.Errorf("Table %q: FinalPages: got %d, want %d", g.Table, a.FinalPages, g.FinalPages)
 		}
 		if a.BloatRemovedPages != g.BloatRemovedPages {
-			t.Errorf("Results[%d].BloatRemovedPages: got %d, want %d", i, a.BloatRemovedPages, g.BloatRemovedPages)
+			t.Errorf("Table %q: BloatRemovedPages: got %d, want %d", g.Table, a.BloatRemovedPages, g.BloatRemovedPages)
 		}
 		if a.BloatRemovedBytes != g.BloatRemovedBytes {
-			t.Errorf("Results[%d].BloatRemovedBytes: got %d, want %d", i, a.BloatRemovedBytes, g.BloatRemovedBytes)
+			t.Errorf("Table %q: BloatRemovedBytes: got %d, want %d", g.Table, a.BloatRemovedBytes, g.BloatRemovedBytes)
 		}
 	}
 }
