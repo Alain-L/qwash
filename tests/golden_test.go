@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 )
 
@@ -88,35 +89,22 @@ func compareDebloatJSON(t *testing.T, actual, golden DebloatJSON) {
 		return
 	}
 
-	// Build map of actual results by table name for order-independent comparison
-	actualMap := make(map[string]struct {
-		InitialPages      int
-		FinalPages        int
-		BloatRemovedPages int
-		BloatRemovedBytes int64
+	// Sort both arrays by table name for idempotent comparison
+	sort.Slice(actual.Results, func(i, j int) bool {
+		return actual.Results[i].Table < actual.Results[j].Table
 	})
-	for _, r := range actual.Results {
-		actualMap[r.Table] = struct {
-			InitialPages      int
-			FinalPages        int
-			BloatRemovedPages int
-			BloatRemovedBytes int64
-		}{
-			InitialPages:      r.InitialPages,
-			FinalPages:        r.FinalPages,
-			BloatRemovedPages: r.BloatRemovedPages,
-			BloatRemovedBytes: r.BloatRemovedBytes,
-		}
-	}
+	sort.Slice(golden.Results, func(i, j int) bool {
+		return golden.Results[i].Table < golden.Results[j].Table
+	})
 
-	// Compare each result from golden with actual (order-independent)
-	for _, g := range golden.Results {
-		a, found := actualMap[g.Table]
-		if !found {
-			t.Errorf("Table %q: not found in actual results", g.Table)
-			continue
-		}
+	// Compare each result by position (now order-independent due to sorting)
+	for i := range golden.Results {
+		a := actual.Results[i]
+		g := golden.Results[i]
 
+		if a.Table != g.Table {
+			t.Errorf("Results[%d].Table: got %q, want %q", i, a.Table, g.Table)
+		}
 		if a.InitialPages != g.InitialPages {
 			t.Errorf("Table %q: InitialPages: got %d, want %d", g.Table, a.InitialPages, g.InitialPages)
 		}
