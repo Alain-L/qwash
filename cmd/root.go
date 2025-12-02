@@ -407,11 +407,22 @@ func runDebloat(connection *db.DB) {
 	// Determine number of workers
 	numWorkers := jobsFlag
 	if numWorkers <= 0 {
-		// Default: 4 workers for default mode, 8 for fast mode
-		if fastFlag {
-			numWorkers = 8
+		if updateFlag {
+			// UPDATE mode: --fast=4, default=2, --slow=1
+			if fastFlag {
+				numWorkers = 4
+			} else if slowFlag {
+				numWorkers = 1
+			} else {
+				numWorkers = 2
+			}
 		} else {
-			numWorkers = 4
+			// DELETE/INSERT mode: 4 workers for default, 8 for fast
+			if fastFlag {
+				numWorkers = 8
+			} else {
+				numWorkers = 4
+			}
 		}
 	}
 	// Cap at number of tables
@@ -472,7 +483,8 @@ func runDebloatSequential(connection *db.DB, tables []string, limitBytes int64) 
 
 	// Set total tables for progress display
 	connection.TotalTables = len(tables)
-	connection.SilentProgress = jsonFlag
+	// Silence internal progress when showing main progress bar (non-verbose, non-json)
+	connection.SilentProgress = jsonFlag || (!verboseFlag && !dryRunFlag)
 
 	for i, table := range tables {
 		// Check if limit is reached
@@ -484,6 +496,11 @@ func runDebloatSequential(connection *db.DB, tables []string, limitBytes int64) 
 			break
 		}
 
+		// Show progress bar (same as parallel mode)
+		if !jsonFlag && !verboseFlag && !dryRunFlag {
+			printParallelProgress(i, len(tables), 1)
+		}
+
 		connection.CurrentTableIndex = i
 		result := processTable(connection, table)
 		results = append(results, result)
@@ -491,11 +508,11 @@ func runDebloatSequential(connection *db.DB, tables []string, limitBytes int64) 
 		if result.BloatRemoved > 0 {
 			totalBloatRemoved += int64(result.BloatRemoved) * 8192
 		}
+	}
 
-		// Clear progress line after each table
-		if !verboseFlag && !dryRunFlag && !jsonFlag {
-			fmt.Print("\r\033[K")
-		}
+	// Clear progress line at the end
+	if !verboseFlag && !dryRunFlag && !jsonFlag {
+		fmt.Print("\r\033[K")
 	}
 
 	return results, limitReached
@@ -616,7 +633,11 @@ func printParallelProgress(completed, total, workers int) {
 	filled := int(progress * float64(barWidth))
 
 	bar := strings.Repeat("=", filled) + strings.Repeat(" ", barWidth-filled)
-	fmt.Printf("\r\033[K[%s] %d/%d tables | %d workers", bar, completed, total, workers)
+	workerWord := "workers"
+	if workers == 1 {
+		workerWord = "worker"
+	}
+	fmt.Printf("\r\033[K[%s] %d/%d tables | %d %s", bar, completed, total, workers, workerWord)
 }
 
 
@@ -682,12 +703,20 @@ func processTable(connection *db.DB, table string) analysis.DebloatResult {
 		fmt.Printf("  %s: compacting %d pages...\n", table, bloatPages)
 	}
 	var compactErr error
-	if updateFlag && fastFlag {
-		// UPDATE method with bloat-based target (fast, may need 2 passes)
-		compactErr = connection.CompactTableUpdateFast(table)
-	} else if updateFlag {
-		// UPDATE method processing all pages (complete compaction in 1 pass)
-		compactErr = connection.CompactTableUpdate(table)
+	if updateFlag {
+		// UPDATE method: number of passes depends on mode
+		passes := 2 // default: 2 passes
+		if fastFlag {
+			passes = 1 // fast: 1 pass only
+		} else if slowFlag {
+			passes = 3 // slow: 3 passes for thorough compaction
+		}
+		for pass := 1; pass <= passes; pass++ {
+			compactErr = connection.CompactTableUpdate(table)
+			if compactErr != nil {
+				break
+			}
+		}
 	} else if fastFlag {
 		compactErr = connection.CompactTableFast(table, bloatPages)
 	} else if slowFlag {
