@@ -59,6 +59,7 @@ sql/_*.sql
 # Archived/experimental code
 db/query_update_archive.go
 db/query_legacy.go
+db/_query_bench_test.go
 cmd/root_legacy.go
 
 # Legacy SQL templates (DELETE/INSERT method)
