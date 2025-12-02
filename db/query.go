@@ -13,6 +13,112 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
+// Safety thresholds
+const (
+	// MaxTransactionAgeMinutes is the max age of transactions before warning
+	MaxTransactionAgeMinutes = 30
+	// LockWaitTimeoutSeconds is how long to wait for locks before failing
+	LockWaitTimeoutSeconds = 5
+)
+
+// checkTableLocks verifies no conflicting locks exist on the table.
+// Returns an error if ACCESS EXCLUSIVE or SHARE locks are held.
+func (db *DB) checkTableLocks(tableName string) error {
+	ctx := context.Background()
+
+	// Parse schema and table name
+	var schemaName, relName string
+	if strings.Contains(tableName, ".") {
+		parts := strings.SplitN(tableName, ".", 2)
+		schemaName = parts[0]
+		relName = parts[1]
+	} else {
+		schemaName = "public"
+		relName = tableName
+	}
+
+	// Check for conflicting locks (ACCESS EXCLUSIVE, SHARE, SHARE ROW EXCLUSIVE)
+	query := `
+		SELECT l.mode, a.usename, a.application_name,
+		       extract(epoch from (now() - a.query_start))::int as duration_sec
+		FROM pg_locks l
+		JOIN pg_class c ON l.relation = c.oid
+		JOIN pg_namespace n ON c.relnamespace = n.oid
+		LEFT JOIN pg_stat_activity a ON l.pid = a.pid
+		WHERE n.nspname = $1 AND c.relname = $2
+		  AND l.mode IN ('AccessExclusiveLock', 'ShareLock', 'ShareRowExclusiveLock', 'ExclusiveLock')
+		  AND l.granted = true
+		LIMIT 1
+	`
+
+	var lockMode, userName, appName string
+	var durationSec int
+	err := db.QueryRow(ctx, query, schemaName, relName).Scan(&lockMode, &userName, &appName, &durationSec)
+
+	if err == nil {
+		// Found a conflicting lock
+		return fmt.Errorf("table '%s' has conflicting lock: %s (held by %s/%s for %ds)",
+			tableName, lockMode, userName, appName, durationSec)
+	}
+	if err.Error() != "no rows in result set" {
+		return fmt.Errorf("failed to check locks: %w", err)
+	}
+
+	return nil
+}
+
+// checkLongTransactions checks for transactions older than threshold.
+// These can block VACUUM from reclaiming space.
+// Returns a warning message if found, empty string otherwise.
+func (db *DB) checkLongTransactions() (string, error) {
+	ctx := context.Background()
+
+	query := `
+		SELECT usename, application_name,
+		       extract(epoch from (now() - xact_start))/60 as age_minutes,
+		       state
+		FROM pg_stat_activity
+		WHERE xact_start IS NOT NULL
+		  AND pid != pg_backend_pid()
+		  AND extract(epoch from (now() - xact_start))/60 > $1
+		ORDER BY xact_start
+		LIMIT 3
+	`
+
+	rows, err := db.conn.Query(ctx, query, MaxTransactionAgeMinutes)
+	if err != nil {
+		return "", fmt.Errorf("failed to check transactions: %w", err)
+	}
+	defer rows.Close()
+
+	var warnings []string
+	for rows.Next() {
+		var userName, appName, state string
+		var ageMinutes float64
+		if err := rows.Scan(&userName, &appName, &ageMinutes, &state); err != nil {
+			continue
+		}
+		warnings = append(warnings, fmt.Sprintf("%s/%s (%.0fmin, %s)", userName, appName, ageMinutes, state))
+	}
+
+	if len(warnings) > 0 {
+		return fmt.Sprintf("long-running transactions may block VACUUM: %s", strings.Join(warnings, ", ")), nil
+	}
+	return "", nil
+}
+
+// setLockTimeout sets statement_timeout for lock acquisition.
+// This prevents waiting indefinitely for locks.
+func (db *DB) setLockTimeout(ctx context.Context) error {
+	_, err := db.conn.Exec(ctx, fmt.Sprintf("SET lock_timeout = '%ds'", LockWaitTimeoutSeconds))
+	return err
+}
+
+// resetLockTimeout resets the lock timeout to default.
+func (db *DB) resetLockTimeout(ctx context.Context) {
+	db.conn.Exec(ctx, "SET lock_timeout = 0")
+}
+
 // Exec executes a query without returning rows.
 func (db *DB) Exec(ctx context.Context, query string, args ...interface{}) (pgconn.CommandTag, error) {
 	return db.conn.Exec(ctx, query, args...)
@@ -577,6 +683,24 @@ func (db *DB) RunQwashUpdateFilledPages(tableName string, pageCount int) error {
 // This approach is efficient and may require 1-2 passes for complete compaction.
 func (db *DB) CompactTableUpdate(tableName string) error {
 	ctx := context.Background()
+
+	// Safety check: verify no conflicting locks on table
+	if err := db.checkTableLocks(tableName); err != nil {
+		return err
+	}
+
+	// Safety check: warn about long-running transactions
+	if warning, err := db.checkLongTransactions(); err != nil {
+		return fmt.Errorf("failed to check transactions: %w", err)
+	} else if warning != "" && db.Verbose {
+		fmt.Printf("  Warning: %s\n", warning)
+	}
+
+	// Set lock timeout to avoid waiting indefinitely
+	if err := db.setLockTimeout(ctx); err != nil {
+		return fmt.Errorf("failed to set lock timeout: %w", err)
+	}
+	defer db.resetLockTimeout(ctx)
 
 	// Acquire advisory lock to prevent concurrent compaction
 	locked, err := db.acquireTableLock(tableName)
