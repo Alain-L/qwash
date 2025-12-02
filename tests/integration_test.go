@@ -178,10 +178,12 @@ func TestDebloatDefault(t *testing.T) {
 		t.Skip("Not enough bloat to test (need at least 5 pages)")
 	}
 
-	// Run debloat
-	err := conn.CompactTable(tableName, initialBloat)
-	if err != nil {
-		t.Fatalf("CompactTable failed: %v", err)
+	// Run debloat (2 passes like default mode)
+	for pass := 1; pass <= 2; pass++ {
+		err := conn.CompactTableUpdate(tableName)
+		if err != nil {
+			t.Fatalf("CompactTableUpdate pass %d failed: %v", pass, err)
+		}
 	}
 
 	finalPages := getTablePages(t, conn, tableName)
@@ -223,10 +225,10 @@ func TestDebloatFast(t *testing.T) {
 		t.Skip("Not enough bloat to test")
 	}
 
-	// Run fast debloat
-	err := conn.CompactTableFast(tableName, initialBloat)
+	// Run fast debloat (1 pass)
+	err := conn.CompactTableUpdate(tableName)
 	if err != nil {
-		t.Fatalf("CompactTableFast failed: %v", err)
+		t.Fatalf("CompactTableUpdate failed: %v", err)
 	}
 
 	finalPages := getTablePages(t, conn, tableName)
@@ -269,10 +271,12 @@ func TestDebloatSlow(t *testing.T) {
 		t.Skip("Not enough bloat to test")
 	}
 
-	// Run slow debloat with minimal delay for testing
-	err := conn.CompactTableSlow(tableName, initialBloat, 1) // 1ms delay
-	if err != nil {
-		t.Fatalf("CompactTableSlow failed: %v", err)
+	// Run slow debloat (3 passes like slow mode)
+	for pass := 1; pass <= 3; pass++ {
+		err := conn.CompactTableUpdate(tableName)
+		if err != nil {
+			t.Fatalf("CompactTableUpdate pass %d failed: %v", pass, err)
+		}
 	}
 
 	finalPages := getTablePages(t, conn, tableName)
@@ -315,10 +319,13 @@ func TestDebloatSlowWithDelay(t *testing.T) {
 		t.Skip("Not enough bloat to test")
 	}
 
-	// Run slow debloat with 5ms delay
-	err := conn.CompactTableSlow(tableName, initialBloat, 5)
-	if err != nil {
-		t.Fatalf("CompactTableSlow with delay failed: %v", err)
+	// Run slow debloat (3 passes like slow mode with delay)
+	conn.DelayMs = 5
+	for pass := 1; pass <= 3; pass++ {
+		err := conn.CompactTableUpdate(tableName)
+		if err != nil {
+			t.Fatalf("CompactTableUpdate pass %d failed: %v", pass, err)
+		}
 	}
 
 	finalPages := getTablePages(t, conn, tableName)
@@ -359,10 +366,12 @@ func TestDebloatSpecificTable(t *testing.T) {
 		t.Skip("Not enough bloat to test")
 	}
 
-	// Debloat only the target table
-	err := conn.CompactTable("table_target", targetInitialBloat)
-	if err != nil {
-		t.Fatalf("CompactTable failed: %v", err)
+	// Debloat only the target table (2 passes)
+	for pass := 1; pass <= 2; pass++ {
+		err := conn.CompactTableUpdate("table_target")
+		if err != nil {
+			t.Fatalf("CompactTableUpdate pass %d failed: %v", pass, err)
+		}
 	}
 
 	targetFinalPages := getTablePages(t, conn, "table_target")
@@ -419,9 +428,16 @@ func TestDebloatMultipleTables(t *testing.T) {
 
 		t.Logf("%s: initial %d pages, %d bloat", tbl.name, initialPages, initialBloat)
 
-		err := conn.CompactTable(tbl.name, initialBloat)
-		if err != nil {
-			t.Errorf("CompactTable failed for %s: %v", tbl.name, err)
+		// Run 2 passes like default mode
+		var compactErr error
+		for pass := 1; pass <= 2; pass++ {
+			compactErr = conn.CompactTableUpdate(tbl.name)
+			if compactErr != nil {
+				break
+			}
+		}
+		if compactErr != nil {
+			t.Errorf("CompactTableUpdate failed for %s: %v", tbl.name, compactErr)
 			continue
 		}
 
@@ -523,10 +539,12 @@ func TestDebloatHighBloat(t *testing.T) {
 		t.Skip("Not enough bloat to test")
 	}
 
-	// Run debloat
-	err := conn.CompactTable(tableName, initialBloat)
-	if err != nil {
-		t.Fatalf("CompactTable failed: %v", err)
+	// Run debloat (2 passes like default mode)
+	for pass := 1; pass <= 2; pass++ {
+		err := conn.CompactTableUpdate(tableName)
+		if err != nil {
+			t.Fatalf("CompactTableUpdate pass %d failed: %v", pass, err)
+		}
 	}
 
 	finalPages := getTablePages(t, conn, tableName)
@@ -564,10 +582,12 @@ func TestDebloatLowBloat(t *testing.T) {
 		t.Skip("Not enough bloat to test")
 	}
 
-	// Run debloat
-	err := conn.CompactTable(tableName, initialBloat)
-	if err != nil {
-		t.Fatalf("CompactTable failed: %v", err)
+	// Run debloat (2 passes like default mode)
+	for pass := 1; pass <= 2; pass++ {
+		err := conn.CompactTableUpdate(tableName)
+		if err != nil {
+			t.Fatalf("CompactTableUpdate pass %d failed: %v", pass, err)
+		}
 	}
 
 	finalPages := getTablePages(t, conn, tableName)
@@ -846,9 +866,12 @@ func TestDebloatSchemaQualifiedTable(t *testing.T) {
 		t.Skip("Not enough bloat to test")
 	}
 
-	err := conn.CompactTable("custom_schema.schema_test", initialBloat)
-	if err != nil {
-		t.Fatalf("CompactTable failed: %v", err)
+	// Run 2 passes like default mode
+	for pass := 1; pass <= 2; pass++ {
+		err := conn.CompactTableUpdate("custom_schema.schema_test")
+		if err != nil {
+			t.Fatalf("CompactTableUpdate pass %d failed: %v", pass, err)
+		}
 	}
 
 	finalPages := getTablePages(t, conn, "custom_schema.schema_test")

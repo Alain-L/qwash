@@ -131,10 +131,10 @@ The difference is the estimated bloat.
 
 ### Bloat Reduction Algorithm
 
-The debloat algorithm works by iteratively moving tuples from the end of the table to fill gaps left by deleted rows:
+The debloat algorithm uses an **UPDATE-based compaction** approach via a temporary stored procedure:
 
-1. Select rows from the last N pages of the table
-2. Delete and reinsert them (PostgreSQL places them in earlier free space)
+1. Create a procedure that updates rows from the last N pages (`UPDATE SET col = col`)
+2. PostgreSQL rewrites these tuples, placing them in earlier free space (HOT updates are bypassed)
 3. Run `VACUUM` to release the now-empty pages at the end
 4. Repeat until bloat is minimized
 
@@ -142,6 +142,7 @@ This approach:
 - **Never blocks writes** — uses regular DML operations
 - **Is transaction-safe** — can be interrupted safely
 - **Works incrementally** — progress is preserved between runs
+- **Preserves row identity** — no DELETE/INSERT, sequences and references unchanged
 
 ### Debloat Modes
 
@@ -265,7 +266,6 @@ go test ./tests -run TestEstimate -v
 
 ## References
 
-- [`sql/demo.sql`](sql/demo.sql) — Step-by-step SQL demo of the qwash algorithm
 - [ioguix/pgsql-bloat-estimation](https://github.com/ioguix/pgsql-bloat-estimation) — Approach for stats-based bloat estimation without pgstattuple
 - [dataegret/pgcompacttable](https://github.com/dataegret/pgcompacttable) — Perl tool for reorganizing bloated tables without locks
 

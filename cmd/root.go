@@ -41,10 +41,9 @@ var (
 
 	// Debloat options
 	debloatFlag bool   // --debloat (-B)
-	fastFlag    bool   // --fast
-	slowFlag    bool   // --slow (1 page at a time with delay)
-	legacyFlag  bool   // --legacy (use old DELETE/INSERT method)
-	delayMs     int    // --delay (milliseconds between operations in slow mode)
+	fastFlag bool // --fast
+	slowFlag bool // --slow (1 page at a time with delay)
+	delayMs  int  // --delay (milliseconds between operations in slow mode)
 	dryRunFlag  bool   // --dry-run
 	reindexFlag bool   // --reindex
 	limitStr    string // --limit (stop after reducing X bloat: 500MB, 1GB, 50%)
@@ -114,8 +113,6 @@ func init() {
 		"Fast mode: 4 threads, 1 pass (default: 2 threads, 2 passes)")
 	rootCmd.PersistentFlags().BoolVar(&slowFlag, "slow", false,
 		"Slow mode: 1 thread, 3 passes with delay between operations")
-	rootCmd.PersistentFlags().BoolVar(&legacyFlag, "legacy", false,
-		"Use legacy DELETE/INSERT method (deprecated, will be removed)")
 	rootCmd.PersistentFlags().IntVar(&delayMs, "delay", 10,
 		"Delay in milliseconds between operations in slow mode (default: 10)")
 	rootCmd.PersistentFlags().BoolVar(&dryRunFlag, "dry-run", false,
@@ -156,9 +153,9 @@ func executeAnalysis(cmd *cobra.Command, args []string) {
 		log.Fatalf("[ERROR] --reindex requires --debloat (-B).")
 	}
 
-	// --fast, --slow, --dry-run, --update require --debloat
-	if (fastFlag || slowFlag || dryRunFlag || legacyFlag) && !debloatFlag {
-		log.Fatalf("[ERROR] --fast, --slow, --dry-run, and --legacy require --debloat (-B).")
+	// --fast, --slow, --dry-run require --debloat
+	if (fastFlag || slowFlag || dryRunFlag) && !debloatFlag {
+		log.Fatalf("[ERROR] --fast, --slow, and --dry-run require --debloat (-B).")
 	}
 
 	// --fast and --slow are mutually exclusive
@@ -351,9 +348,6 @@ func runDebloat(connection *db.DB) {
 		if fastFlag {
 			fmt.Println("FAST MODE: 4 threads, 1 pass")
 		}
-		if legacyFlag {
-			fmt.Println("LEGACY MODE: Using DELETE/INSERT method (deprecated)")
-		}
 		if limitBytes > 0 {
 			fmt.Printf("LIMIT: %s\n", output.FormatSize(limitBytes))
 		} else if limitPercent > 0 {
@@ -407,22 +401,13 @@ func runDebloat(connection *db.DB) {
 	// Determine number of workers
 	numWorkers := jobsFlag
 	if numWorkers <= 0 {
-		if legacyFlag {
-			// Legacy DELETE/INSERT mode: 4 workers for default, 8 for fast
-			if fastFlag {
-				numWorkers = 8
-			} else {
-				numWorkers = 4
-			}
+		// --fast=4, default=2, --slow=1
+		if fastFlag {
+			numWorkers = 4
+		} else if slowFlag {
+			numWorkers = 1
 		} else {
-			// Default UPDATE mode: --fast=4, default=2, --slow=1
-			if fastFlag {
-				numWorkers = 4
-			} else if slowFlag {
-				numWorkers = 1
-			} else {
-				numWorkers = 2
-			}
+			numWorkers = 2
 		}
 	}
 	// Cap at number of tables
@@ -445,7 +430,7 @@ func runDebloat(connection *db.DB) {
 	}
 
 	// Set delay for --slow mode (used by CompactTableUpdate)
-	if slowFlag && !legacyFlag {
+	if slowFlag {
 		connection.DelayMs = delayMs
 	}
 
@@ -708,28 +693,17 @@ func processTable(connection *db.DB, table string) analysis.DebloatResult {
 		fmt.Printf("  %s: compacting %d pages...\n", table, bloatPages)
 	}
 	var compactErr error
-	if legacyFlag {
-		// Legacy DELETE/INSERT method
-		if fastFlag {
-			compactErr = connection.CompactTableFast(table, bloatPages)
-		} else if slowFlag {
-			compactErr = connection.CompactTableSlow(table, bloatPages, delayMs)
-		} else {
-			compactErr = connection.CompactTable(table, bloatPages)
-		}
-	} else {
-		// Default UPDATE method: number of passes depends on mode
-		passes := 2 // default: 2 passes
-		if fastFlag {
-			passes = 1 // fast: 1 pass only
-		} else if slowFlag {
-			passes = 3 // slow: 3 passes for thorough compaction
-		}
-		for pass := 1; pass <= passes; pass++ {
-			compactErr = connection.CompactTableUpdate(table)
-			if compactErr != nil {
-				break
-			}
+	// Number of passes depends on mode
+	passes := 2 // default: 2 passes
+	if fastFlag {
+		passes = 1 // fast: 1 pass only
+	} else if slowFlag {
+		passes = 3 // slow: 3 passes for thorough compaction
+	}
+	for pass := 1; pass <= passes; pass++ {
+		compactErr = connection.CompactTableUpdate(table)
+		if compactErr != nil {
+			break
 		}
 	}
 

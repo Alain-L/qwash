@@ -58,6 +58,11 @@ sql/_*.sql
 
 # Archived/experimental code
 db/query_update_archive.go
+db/query_legacy.go
+cmd/root_legacy.go
+
+# Legacy SQL templates (DELETE/INSERT method)
+sql/_templates.go
 
 
 # Log files
