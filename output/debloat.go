@@ -11,12 +11,13 @@ import (
 
 // DebloatOptions contains options for formatting debloat output
 type DebloatOptions struct {
-	FastMode     bool
-	SlowMode     bool
-	DryRun       bool
-	LimitReached bool
-	InitialBloat int64
-	Workers      int // Number of parallel workers (1 = sequential)
+	FastMode          bool
+	SlowMode          bool
+	DryRun            bool
+	LimitReached      bool
+	InitialBloat      int64
+	TotalDatabaseSize int64 // Total size of all processed tables (for remaining % calculation)
+	Workers           int   // Number of parallel workers (1 = sequential)
 }
 
 // PrintDebloatSummary prints a text summary of debloat results
@@ -73,17 +74,23 @@ func PrintDebloatSummary(results []analysis.DebloatResult, totalDuration time.Du
 		fmt.Printf("  Errors                    : %d\n", errors)
 	}
 
-	// Bloat removed with percentage
-	if opts.InitialBloat > 0 {
+	// Bloat removed with percentage of final database size remaining
+	if opts.InitialBloat > 0 && opts.TotalDatabaseSize > 0 {
 		remainingBloat := opts.InitialBloat - totalBytesRemoved
 		if remainingBloat < 0 {
 			remainingBloat = 0
 		}
-		remainingPct := float64(remainingBloat) * 100.0 / float64(opts.InitialBloat)
-		if remainingPct < 1.0 {
-			fmt.Printf("  Bloat removed             : %s (< 1%% remaining)\n", FormatSize(totalBytesRemoved))
+		// Calculate remaining bloat as percentage of FINAL database size (after compaction)
+		// This matches what --estimate would show after running debloat
+		finalDatabaseSize := opts.TotalDatabaseSize - totalBytesRemoved
+		if finalDatabaseSize <= 0 {
+			finalDatabaseSize = opts.TotalDatabaseSize
+		}
+		remainingPct := float64(remainingBloat) * 100.0 / float64(finalDatabaseSize)
+		if remainingPct < 0.1 {
+			fmt.Printf("  Bloat removed             : %s (< 0.1%% remaining)\n", FormatSize(totalBytesRemoved))
 		} else {
-			fmt.Printf("  Bloat removed             : %s (%.0f%% remaining)\n", FormatSize(totalBytesRemoved), remainingPct)
+			fmt.Printf("  Bloat removed             : %s (%.1f%% remaining)\n", FormatSize(totalBytesRemoved), remainingPct)
 		}
 	} else {
 		fmt.Printf("  Bloat removed             : %s\n", FormatSize(totalBytesRemoved))

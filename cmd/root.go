@@ -43,7 +43,8 @@ var (
 	debloatFlag bool   // --debloat (-B)
 	fastFlag    bool   // --fast
 	slowFlag    bool   // --slow (1 page at a time with delay, like pgcompacttable)
-	delayMs     int    // --delay (milliseconds between operations in slow mode)
+	updateFlag  bool   // --update (use UPDATE instead of DELETE/INSERT, like pgcompacttable)
+	delayMs  int  // --delay (milliseconds between operations in slow mode)
 	dryRunFlag  bool   // --dry-run
 	reindexFlag bool   // --reindex
 	limitStr    string // --limit (stop after reducing X bloat: 500MB, 1GB, 50%)
@@ -113,6 +114,8 @@ func init() {
 		"Fast mode: ~97%% efficiency, significantly faster")
 	rootCmd.PersistentFlags().BoolVar(&slowFlag, "slow", false,
 		"Slow mode: 1 page at a time with delay (like pgcompacttable)")
+	rootCmd.PersistentFlags().BoolVar(&updateFlag, "update", false,
+		"Use UPDATE method instead of DELETE/INSERT (like pgcompacttable)")
 	rootCmd.PersistentFlags().IntVar(&delayMs, "delay", 10,
 		"Delay in milliseconds between operations in slow mode (default: 10)")
 	rootCmd.PersistentFlags().BoolVar(&dryRunFlag, "dry-run", false,
@@ -153,14 +156,14 @@ func executeAnalysis(cmd *cobra.Command, args []string) {
 		log.Fatalf("[ERROR] --reindex requires --debloat (-B).")
 	}
 
-	// --fast, --slow, --dry-run require --debloat
-	if (fastFlag || slowFlag || dryRunFlag) && !debloatFlag {
-		log.Fatalf("[ERROR] --fast, --slow, and --dry-run require --debloat (-B).")
+	// --fast, --slow, --dry-run, --update require --debloat
+	if (fastFlag || slowFlag || dryRunFlag || updateFlag) && !debloatFlag {
+		log.Fatalf("[ERROR] --fast, --slow, --dry-run, and --update require --debloat (-B).")
 	}
 
 	// --fast and --slow are mutually exclusive
 	if fastFlag && slowFlag {
-		log.Fatalf("[ERROR] --fast and --slow cannot be used together.")
+		log.Fatalf("[ERROR] --fast and --slow are mutually exclusive.")
 	}
 
 	// --delay requires --slow
@@ -348,6 +351,9 @@ func runDebloat(connection *db.DB) {
 		if fastFlag {
 			fmt.Println("FAST MODE: Using adaptive vacuum")
 		}
+		if updateFlag {
+			fmt.Println("UPDATE MODE: Using UPDATE SET col=col (like pgcompacttable)")
+		}
 		if limitBytes > 0 {
 			fmt.Printf("LIMIT: %s\n", output.FormatSize(limitBytes))
 		} else if limitPercent > 0 {
@@ -366,16 +372,22 @@ func runDebloat(connection *db.DB) {
 		return
 	}
 
-	// Calculate total bloat and build map for LPT scheduling
+	// Calculate total bloat, total size, and build map for LPT scheduling
 	// LPT (Longest Processing Time First) sorts tables by bloat size descending
 	// to optimize parallel processing - biggest tables first so smaller ones fill gaps
 	var totalBloat int64
+	var totalDatabaseSize int64
 	tableBloatPages := make(map[string]int)
 	for _, table := range tables {
 		bloatPages, err := connection.GetBloatPages(table)
 		if err == nil && bloatPages > 0 {
 			totalBloat += int64(bloatPages) * 8192 // Convert pages to bytes (8KB per page)
 			tableBloatPages[table] = bloatPages
+		}
+		// Get total table size for percentage calculation
+		tablePages, err := connection.GetTablePages(table)
+		if err == nil && tablePages > 0 {
+			totalDatabaseSize += int64(tablePages) * 8192
 		}
 	}
 
@@ -437,12 +449,13 @@ func runDebloat(connection *db.DB) {
 
 	// Output results
 	opts := output.DebloatOptions{
-		FastMode:     fastFlag,
-		SlowMode:     slowFlag,
-		DryRun:       dryRunFlag,
-		LimitReached: limitReached,
-		InitialBloat: totalBloat,
-		Workers:      numWorkers,
+		FastMode:          fastFlag,
+		SlowMode:          slowFlag,
+		DryRun:            dryRunFlag,
+		LimitReached:      limitReached,
+		InitialBloat:      totalBloat,
+		TotalDatabaseSize: totalDatabaseSize,
+		Workers:           numWorkers,
 	}
 	if jsonFlag {
 		output.PrintDebloatJSON(results, totalDuration, opts)
@@ -669,7 +682,10 @@ func processTable(connection *db.DB, table string) analysis.DebloatResult {
 		fmt.Printf("  %s: compacting %d pages...\n", table, bloatPages)
 	}
 	var compactErr error
-	if fastFlag {
+	if updateFlag {
+		// UPDATE method (like pgcompacttable) - separate algorithm
+		compactErr = connection.CompactTableUpdate(table)
+	} else if fastFlag {
 		compactErr = connection.CompactTableFast(table, bloatPages)
 	} else if slowFlag {
 		compactErr = connection.CompactTableSlow(table, bloatPages, delayMs)
