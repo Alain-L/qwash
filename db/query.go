@@ -594,13 +594,13 @@ func (db *DB) CompactTableUpdate(tableName string) error {
 		}
 	}()
 
-	// Find an updatable column (like pgcompacttable: prefer non-indexed, fixed-length)
+	// Find an updatable column (prefer non-indexed, fixed-length)
 	column, err := db.getUpdatableColumn(tableName)
 	if err != nil {
 		return err
 	}
 
-	// Set session_replication_role = replica to disable triggers (like pgcompacttable)
+	// Set session_replication_role = replica to disable triggers
 	_, err = db.conn.Exec(ctx, "SET session_replication_role = replica")
 	if err != nil {
 		return fmt.Errorf("failed to set session_replication_role: %w", err)
@@ -629,78 +629,9 @@ func (db *DB) CompactTableUpdate(tableName string) error {
 			initialPages, toPage, bloatPages)
 	}
 
-	// Create stored procedure (exactly like pgcompacttable)
-	// Key insight: pgcompacttable loops internally, re-updating tuples until they move!
-	// This fills the page with dead tuples until HOT is no longer possible.
-	// Use WorkerID + timestamp to ensure unique procedure name in parallel mode
+	// Create stored procedure from embedded SQL
 	procName := fmt.Sprintf("qwash_compact_w%d_%d", db.WorkerID, time.Now().UnixNano())
-	createProc := fmt.Sprintf(`
-		CREATE OR REPLACE FUNCTION %s(
-			i_table_ident text,
-			i_column_ident text,
-			i_to_page integer,
-			i_page_offset integer,
-			i_max_tuples_per_page integer
-		) RETURNS integer AS $$
-		DECLARE
-			_from_page integer := i_to_page - i_page_offset + 1;
-			_min_ctid tid;
-			_max_ctid tid;
-			_ctid_list tid[];
-			_next_ctid_list tid[];
-			_ctid tid;
-			_loop integer;
-			_result_page integer;
-			_update_query text :=
-				'UPDATE ONLY ' || i_table_ident ||
-				' SET ' || i_column_ident || ' = ' || i_column_ident ||
-				' WHERE ctid = ANY($1) RETURNING ctid';
-		BEGIN
-			-- Define minimal and maximal ctid values of the range
-			_min_ctid := (_from_page, 1)::text::tid;
-			_max_ctid := (i_to_page, i_max_tuples_per_page)::text::tid;
-
-			-- Build a list of possible ctid values of the range
-			SELECT array_agg((pi, ti)::text::tid)
-			INTO _ctid_list
-			FROM generate_series(_from_page, i_to_page) AS pi
-			CROSS JOIN generate_series(1, i_max_tuples_per_page) AS ti;
-
-			<<_outer_loop>>
-			FOR _loop IN 1..i_max_tuples_per_page LOOP
-				_next_ctid_list := array[]::tid[];
-
-				-- Update all the tuples in the range
-				FOR _ctid IN EXECUTE _update_query USING _ctid_list
-				LOOP
-					IF _ctid > _max_ctid THEN
-						-- Tuple moved ABOVE the range (problem)
-						_result_page := -1;
-						EXIT _outer_loop;
-					ELSIF _ctid >= _min_ctid THEN
-						-- Tuple still in the range, needs more updates
-						_next_ctid_list := _next_ctid_list || _ctid;
-					END IF;
-					-- If _ctid < _min_ctid, tuple moved to lower page (success!)
-				END LOOP;
-
-				_ctid_list := _next_ctid_list;
-
-				-- Finish if all tuples have moved out of the range
-				IF coalesce(array_length(_ctid_list, 1), 0) = 0 THEN
-					_result_page := _from_page - 1;
-					EXIT _outer_loop;
-				END IF;
-			END LOOP;
-
-			IF _loop = i_max_tuples_per_page AND _result_page IS NULL THEN
-				_result_page := -2; -- Max loops reached
-			END IF;
-
-			RETURN _result_page;
-		END;
-		$$ LANGUAGE plpgsql
-	`, procName)
+	createProc := fmt.Sprintf(sql.CompactProcedureSQL, procName)
 
 	_, err = db.conn.Exec(ctx, createProc)
 	if err != nil {
@@ -714,10 +645,7 @@ func (db *DB) CompactTableUpdate(tableName string) error {
 		return fmt.Errorf("initial VACUUM failed: %w", err)
 	}
 
-	// pgcompacttable parameters
-	// pages_per_round = 1 (process one page at a time)
-	// pages_before_vacuum = initial_pages / 16 (default ratio from pgcompacttable)
-	// max_tuples_per_page = ~226 for 8KB pages (used for loop limit)
+	// Parameters
 	pagesPerRound := 1
 	pagesBeforeVacuum := initialPages / 16
 	if pagesBeforeVacuum < 1 {
@@ -725,17 +653,17 @@ func (db *DB) CompactTableUpdate(tableName string) error {
 	}
 	maxTuplesPerPage := 226 // Conservative estimate for 8KB pages
 
-	// Prepare table and column identifiers for the procedure
+	// Prepare table and column identifiers
 	tableIdent := sanitizeTableName(tableName)
 	columnIdent := pgx.Identifier{column}.Sanitize()
 
-	// Main loop (exactly like pgcompacttable)
+	// Main loop: process pages from end towards toPage
 	pagesProcessed := 0
 	pagesSinceVacuum := 0
-	currentPage := initialPages - 1 // Start from the last page (0-indexed)
+	currentPage := initialPages - 1 // Start from last page (0-indexed)
 
 	for currentPage > toPage {
-		// Call the procedure to clean pages from currentPage down by pagesPerRound
+		// Call procedure to process current page
 		var resultPage int
 		err = db.QueryRow(ctx,
 			fmt.Sprintf("SELECT %s($1, $2, $3, $4, $5)", procName),
@@ -746,16 +674,10 @@ func (db *DB) CompactTableUpdate(tableName string) error {
 			return fmt.Errorf("procedure call failed at page %d: %w", currentPage, err)
 		}
 
-		if resultPage == -1 {
-			// Tuples moved to higher pages (shouldn't happen normally)
-			if db.Verbose {
-				fmt.Printf("\n  Warning: tuples moved to higher page at page %d\n", currentPage)
-			}
-		} else if resultPage == -2 {
-			// Max loops reached without moving all tuples
-			if db.Verbose {
-				fmt.Printf("\n  Warning: max loops reached at page %d\n", currentPage)
-			}
+		if resultPage == -1 && db.Verbose {
+			fmt.Printf("\n  Warning: tuples moved to higher page at page %d\n", currentPage)
+		} else if resultPage == -2 && db.Verbose {
+			fmt.Printf("\n  Warning: max loops reached at page %d\n", currentPage)
 		}
 
 		pagesProcessed += pagesPerRound
@@ -768,7 +690,7 @@ func (db *DB) CompactTableUpdate(tableName string) error {
 				currentPage, toPage, pagesBeforeVacuum-pagesSinceVacuum)
 		}
 
-		// VACUUM every N pages (like pgcompacttable)
+		// VACUUM periodically
 		if pagesSinceVacuum >= pagesBeforeVacuum {
 			_, err = db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s", sanitizeTableName(tableName)))
 			if err != nil {

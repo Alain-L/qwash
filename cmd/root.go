@@ -42,9 +42,9 @@ var (
 	// Debloat options
 	debloatFlag bool   // --debloat (-B)
 	fastFlag    bool   // --fast
-	slowFlag    bool   // --slow (1 page at a time with delay, like pgcompacttable)
-	updateFlag  bool   // --update (use UPDATE instead of DELETE/INSERT, like pgcompacttable)
-	delayMs  int  // --delay (milliseconds between operations in slow mode)
+	slowFlag    bool   // --slow (1 page at a time with delay)
+	legacyFlag  bool   // --legacy (use old DELETE/INSERT method)
+	delayMs     int    // --delay (milliseconds between operations in slow mode)
 	dryRunFlag  bool   // --dry-run
 	reindexFlag bool   // --reindex
 	limitStr    string // --limit (stop after reducing X bloat: 500MB, 1GB, 50%)
@@ -111,11 +111,11 @@ func init() {
 	rootCmd.PersistentFlags().BoolVarP(&debloatFlag, "debloat", "B", false,
 		"Perform bloat reduction on tables")
 	rootCmd.PersistentFlags().BoolVar(&fastFlag, "fast", false,
-		"Fast mode: ~97%% efficiency, significantly faster")
+		"Fast mode: 4 threads, 1 pass (default: 2 threads, 2 passes)")
 	rootCmd.PersistentFlags().BoolVar(&slowFlag, "slow", false,
-		"Slow mode: 1 page at a time with delay (like pgcompacttable)")
-	rootCmd.PersistentFlags().BoolVar(&updateFlag, "update", false,
-		"Use UPDATE method instead of DELETE/INSERT (like pgcompacttable)")
+		"Slow mode: 1 thread, 3 passes with delay between operations")
+	rootCmd.PersistentFlags().BoolVar(&legacyFlag, "legacy", false,
+		"Use legacy DELETE/INSERT method (deprecated, will be removed)")
 	rootCmd.PersistentFlags().IntVar(&delayMs, "delay", 10,
 		"Delay in milliseconds between operations in slow mode (default: 10)")
 	rootCmd.PersistentFlags().BoolVar(&dryRunFlag, "dry-run", false,
@@ -157,8 +157,8 @@ func executeAnalysis(cmd *cobra.Command, args []string) {
 	}
 
 	// --fast, --slow, --dry-run, --update require --debloat
-	if (fastFlag || slowFlag || dryRunFlag || updateFlag) && !debloatFlag {
-		log.Fatalf("[ERROR] --fast, --slow, --dry-run, and --update require --debloat (-B).")
+	if (fastFlag || slowFlag || dryRunFlag || legacyFlag) && !debloatFlag {
+		log.Fatalf("[ERROR] --fast, --slow, --dry-run, and --legacy require --debloat (-B).")
 	}
 
 	// --fast and --slow are mutually exclusive
@@ -349,10 +349,10 @@ func runDebloat(connection *db.DB) {
 	}
 	if verboseFlag {
 		if fastFlag {
-			fmt.Println("FAST MODE: Using adaptive vacuum")
+			fmt.Println("FAST MODE: 4 threads, 1 pass")
 		}
-		if updateFlag {
-			fmt.Println("UPDATE MODE: Using UPDATE SET col=col (like pgcompacttable)")
+		if legacyFlag {
+			fmt.Println("LEGACY MODE: Using DELETE/INSERT method (deprecated)")
 		}
 		if limitBytes > 0 {
 			fmt.Printf("LIMIT: %s\n", output.FormatSize(limitBytes))
@@ -407,21 +407,21 @@ func runDebloat(connection *db.DB) {
 	// Determine number of workers
 	numWorkers := jobsFlag
 	if numWorkers <= 0 {
-		if updateFlag {
-			// UPDATE mode: --fast=4, default=2, --slow=1
+		if legacyFlag {
+			// Legacy DELETE/INSERT mode: 4 workers for default, 8 for fast
+			if fastFlag {
+				numWorkers = 8
+			} else {
+				numWorkers = 4
+			}
+		} else {
+			// Default UPDATE mode: --fast=4, default=2, --slow=1
 			if fastFlag {
 				numWorkers = 4
 			} else if slowFlag {
 				numWorkers = 1
 			} else {
 				numWorkers = 2
-			}
-		} else {
-			// DELETE/INSERT mode: 4 workers for default, 8 for fast
-			if fastFlag {
-				numWorkers = 8
-			} else {
-				numWorkers = 4
 			}
 		}
 	}
@@ -442,6 +442,11 @@ func runDebloat(connection *db.DB) {
 		for _, t := range tables {
 			fmt.Printf("  - %s\n", t)
 		}
+	}
+
+	// Set delay for --slow mode (used by CompactTableUpdate)
+	if slowFlag && !legacyFlag {
+		connection.DelayMs = delayMs
 	}
 
 	startTime := time.Now()
@@ -703,8 +708,17 @@ func processTable(connection *db.DB, table string) analysis.DebloatResult {
 		fmt.Printf("  %s: compacting %d pages...\n", table, bloatPages)
 	}
 	var compactErr error
-	if updateFlag {
-		// UPDATE method: number of passes depends on mode
+	if legacyFlag {
+		// Legacy DELETE/INSERT method
+		if fastFlag {
+			compactErr = connection.CompactTableFast(table, bloatPages)
+		} else if slowFlag {
+			compactErr = connection.CompactTableSlow(table, bloatPages, delayMs)
+		} else {
+			compactErr = connection.CompactTable(table, bloatPages)
+		}
+	} else {
+		// Default UPDATE method: number of passes depends on mode
 		passes := 2 // default: 2 passes
 		if fastFlag {
 			passes = 1 // fast: 1 pass only
@@ -717,12 +731,6 @@ func processTable(connection *db.DB, table string) analysis.DebloatResult {
 				break
 			}
 		}
-	} else if fastFlag {
-		compactErr = connection.CompactTableFast(table, bloatPages)
-	} else if slowFlag {
-		compactErr = connection.CompactTableSlow(table, bloatPages, delayMs)
-	} else {
-		compactErr = connection.CompactTable(table, bloatPages)
 	}
 
 	if compactErr != nil {

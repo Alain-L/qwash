@@ -31,6 +31,8 @@ type DB struct {
 	SilentProgress bool
 	// WorkerID identifies the worker in parallel mode (0 = main/sequential)
 	WorkerID int
+	// DelayMs is the delay in milliseconds between operations (--slow mode)
+	DelayMs int
 }
 
 // Connect establishes a connection to PostgreSQL and returns a DB struct
