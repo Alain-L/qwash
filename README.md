@@ -128,7 +128,7 @@ Only `VACUUM FULL` (or tools like qwash) can reclaim this space by rewriting the
 
 ### Bloat Estimation
 
-qwash uses the [ioguix bloat estimation queries](https://github.com/ioguix/pgsql-bloat-estimation) to analyze PostgreSQL system catalogs (`pg_class`, `pg_stat_user_tables`, `pg_stats`) without requiring the `pgstattuple` extension. It compares:
+qwash uses the [ioguix bloat estimation approach](https://github.com/ioguix/pgsql-bloat-estimation) to analyze PostgreSQL system catalogs (`pg_class`, `pg_stat_user_tables`, `pg_stats`) without requiring the `pgstattuple` extension. The query has been [reworked](sql/table_bloat.sql) to run standalone without temporary tables. It compares:
 
 - **Actual table size** (pages currently allocated)
 - **Minimum required pages** (calculated from live tuple count and average tuple size)
