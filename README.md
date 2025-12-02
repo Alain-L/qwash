@@ -2,11 +2,17 @@
 
 **qwash** is a PostgreSQL bloat analysis and reduction tool. It identifies and reduces table bloat **without blocking writes** (unlike `VACUUM FULL`), making it safe for production use.
 
+qwash is a **standalone tool** that combines bloat estimation and reduction in a single binary:
+- **No extensions required** — works with any PostgreSQL 9.6+ installation
+- **No external dependencies** — no Perl, Python, or `pgstattuple` needed
+- **Estimate then debloat** — analyze bloat first, then reduce it based on results
+
 ## Features
 
-- **Bloat Estimation** — Analyze tables to identify bloat using PostgreSQL system catalogs
-- **Non-blocking Bloat Reduction** — Reclaim space incrementally without exclusive locks
-- **Multiple Modes** — Default, fast (~97% efficiency), or slow (minimal impact)
+- **Bloat Estimation** — Analyze tables using PostgreSQL system catalogs (no `pgstattuple`)
+- **Non-blocking Reduction** — Reclaim space incrementally without exclusive locks
+- **Trigger & FK Safe** — UPDATE-based approach preserves triggers and foreign key constraints
+- **Multiple Modes** — Default (2 workers), fast (4 workers), or slow (1 worker with delay)
 - **Dry-run Support** — Preview changes before applying them
 - **JSON Output** — Machine-readable output for automation and monitoring
 - **Limit Control** — Stop after reducing a specific amount of bloat
@@ -48,10 +54,10 @@ go build -o bin/qwash
 # Debloat multiple tables
 ./bin/qwash --debloat -d mydb -t table1 -t table2 -t table3
 
-# Fast mode (~97% efficiency, significantly faster)
+# Fast mode (4 workers, 1 pass, ~97% efficiency)
 ./bin/qwash --debloat -d mydb -t mytable --fast
 
-# Slow mode (minimal impact, like pg_compacttable)
+# Slow mode (1 worker, 3 passes, minimal server impact)
 ./bin/qwash --debloat -d mydb -t mytable --slow --delay 100
 
 # Dry-run (preview without changes)
@@ -88,9 +94,9 @@ Analysis:
 
 Debloat:
   -B, --debloat           Perform bloat reduction
-      --fast              Fast mode: ~97% efficiency, significantly faster
-      --slow              Slow mode: 1 page at a time with delay
-      --delay int         Delay in ms between operations in slow mode (default: 10)
+      --fast              Fast mode: 4 workers, 1 pass (~97% efficiency)
+      --slow              Slow mode: 1 worker, 3 passes, with delay between pages
+      --delay int         Delay in ms between pages in slow mode (default: 10)
       --dry-run           Preview changes without applying them
       --reindex           Rebuild indexes after debloat (REINDEX CONCURRENTLY)
       --limit string      Stop after reducing X bloat (e.g., 500MB, 1GB, 50%)
@@ -122,7 +128,7 @@ Only `VACUUM FULL` (or tools like qwash) can reclaim this space by rewriting the
 
 ### Bloat Estimation
 
-qwash analyzes PostgreSQL system catalogs (`pg_class`, `pg_stat_user_tables`, `pg_stats`) to estimate bloat without requiring the `pgstattuple` extension. It compares:
+qwash uses the [ioguix bloat estimation queries](https://github.com/ioguix/pgsql-bloat-estimation) to analyze PostgreSQL system catalogs (`pg_class`, `pg_stat_user_tables`, `pg_stats`) without requiring the `pgstattuple` extension. It compares:
 
 - **Actual table size** (pages currently allocated)
 - **Minimum required pages** (calculated from live tuple count and average tuple size)
@@ -131,7 +137,7 @@ The difference is the estimated bloat.
 
 ### Bloat Reduction Algorithm
 
-The debloat algorithm uses an **UPDATE-based compaction** approach via a temporary stored procedure:
+The debloat algorithm is inspired by [pgcompacttable](https://github.com/dataegret/pgcompacttable) but uses an **UPDATE-based compaction** approach via a temporary stored procedure:
 
 1. Create a procedure that updates rows from the last N pages (`UPDATE SET col = col`)
 2. PostgreSQL rewrites these tuples, placing them in earlier free space (HOT updates are bypassed)
@@ -143,14 +149,15 @@ This approach:
 - **Is transaction-safe** — can be interrupted safely
 - **Works incrementally** — progress is preserved between runs
 - **Preserves row identity** — no DELETE/INSERT, sequences and references unchanged
+- **Trigger & FK safe** — UPDATE fires triggers correctly, foreign keys are preserved
 
 ### Debloat Modes
 
-| Mode | Efficiency | Speed | Use Case |
-|------|------------|-------|----------|
-| **default** | ~99-100% | Medium | Balanced for most workloads |
-| **fast** | ~97% | Fast | When speed matters more than perfection |
-| **slow** | ~99-100% | Slow | Minimal impact on production, with configurable delay |
+| Mode | Workers | Passes | Efficiency | Use Case |
+|------|---------|--------|------------|----------|
+| **default** | 2 | 2 | ~99% | Balanced for most workloads |
+| **fast** | 4 | 1 | ~97% | When speed matters more than perfection |
+| **slow** | 1 | 3 | ~99-100% | Minimal impact on production (with `--delay`) |
 
 ## Output Examples
 
@@ -257,12 +264,19 @@ go test ./tests -run TestEstimate -v
 
 ## Comparison with Alternatives
 
-| Tool | Non-blocking | No extension | In-place | Incremental |
-|------|--------------|--------------|----------|-------------|
-| `VACUUM FULL` | No | Yes | No | No |
-| `pg_repack` | Yes | No | No | No |
-| `pgcompacttable` | Yes | No | Yes | Yes |
-| **qwash** | **Yes** | **Yes** | **Yes** | **Yes** |
+| Feature | VACUUM FULL | pg_repack | pgcompacttable | **qwash** |
+|---------|-------------|-----------|----------------|-----------|
+| Non-blocking | ❌ | ✅ | ✅ | ✅ |
+| No extension | ✅ | ❌ | ✅ | ✅ |
+| No dependencies | ✅ | ❌ | ❌ (Perl) | ✅ |
+| In-place (no copy) | ❌ | ❌ | ✅ | ✅ |
+| Incremental | ❌ | ❌ | ✅ | ✅ |
+| Trigger safe | ✅ | ❌ | ❌ | ✅ |
+| FK safe | ✅ | ❌ | ❌ | ✅ |
+| Built-in estimation | ❌ | ❌ | ❌ | ✅ |
+| Parallel workers | ❌ | ❌ | ❌ | ✅ |
+
+**qwash** is the only tool that combines all these features in a single, standalone binary.
 
 ## References
 
