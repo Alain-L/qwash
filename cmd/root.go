@@ -682,8 +682,11 @@ func processTable(connection *db.DB, table string) analysis.DebloatResult {
 		fmt.Printf("  %s: compacting %d pages...\n", table, bloatPages)
 	}
 	var compactErr error
-	if updateFlag {
-		// UPDATE method (like pgcompacttable) - separate algorithm
+	if updateFlag && fastFlag {
+		// UPDATE method with bloat-based target (fast, may need 2 passes)
+		compactErr = connection.CompactTableUpdateFast(table)
+	} else if updateFlag {
+		// UPDATE method processing all pages (complete compaction in 1 pass)
 		compactErr = connection.CompactTableUpdate(table)
 	} else if fastFlag {
 		compactErr = connection.CompactTableFast(table, bloatPages)
