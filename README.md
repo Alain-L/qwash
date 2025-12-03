@@ -19,6 +19,38 @@ qwash is a **standalone tool** that combines bloat estimation and reduction in a
 
 ## Installation
 
+### Pre-built binaries
+
+Download the latest release from [GitHub Releases](https://github.com/dalibo/qwash/releases):
+
+```sh
+# Linux (amd64)
+curl -LO https://github.com/dalibo/qwash/releases/latest/download/qwash_Linux_amd64.tar.gz
+tar xzf qwash_Linux_amd64.tar.gz
+sudo mv qwash /usr/local/bin/
+
+# macOS (Apple Silicon)
+curl -LO https://github.com/dalibo/qwash/releases/latest/download/qwash_Darwin_arm64.tar.gz
+tar xzf qwash_Darwin_arm64.tar.gz
+sudo mv qwash /usr/local/bin/
+```
+
+### Debian/Ubuntu
+
+```sh
+curl -LO https://github.com/dalibo/qwash/releases/latest/download/qwash_amd64.deb
+sudo dpkg -i qwash_amd64.deb
+```
+
+### RHEL/Rocky/Fedora
+
+```sh
+curl -LO https://github.com/dalibo/qwash/releases/latest/download/qwash_amd64.rpm
+sudo rpm -i qwash_amd64.rpm
+```
+
+### From source
+
 ```sh
 git clone https://github.com/dalibo/qwash.git
 cd qwash
@@ -27,7 +59,6 @@ go build -o bin/qwash
 
 ### Requirements
 
-- Go 1.21+
 - PostgreSQL 9.6+
 
 ## Quick Start
@@ -266,15 +297,15 @@ go test ./tests -run TestEstimate -v
 
 | Feature | VACUUM FULL | pg_repack | pgcompacttable | **qwash** |
 |---------|-------------|-----------|----------------|-----------|
-| Non-blocking | No | Yes | Yes | Yes |
-| No extension | Yes | No (pg_repack) | No (pgstattuple) | Yes |
-| No dependencies | Yes | Yes | No (DBD::Pg) | Yes |
-| In-place (no copy) | No | No | Yes | Yes |
-| Incremental | No | No | Yes | Yes |
-| Trigger safe | Yes | No | Yes | Yes |
-| FK safe | Yes | No | Yes | Yes |
-| Built-in estimation | No | No | No | Yes |
-| Parallel workers | No | No | No | Yes |
+| Non-blocking | No | Yes | Yes | **Yes** |
+| No extension | Yes | No (pg_repack) | No (pgstattuple) | **Yes** |
+| No dependencies | Yes | Yes | No (DBD::Pg) | **Yes** |
+| In-place (no copy) | No | No | Yes | **Yes** |
+| Incremental | No | No | Yes | **Yes** |
+| Trigger safe | Yes | No | Yes | **Yes** |
+| FK safe | Yes | No | Yes | **Yes** |
+| Built-in estimation | No | No | No | **Yes** |
+| Parallel workers | No | No | No | **Yes** |
 
 **qwash** is the only tool that combines all these features in a single, standalone binary.
 
