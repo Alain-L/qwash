@@ -11,7 +11,7 @@ qwash is a **standalone tool** that combines bloat estimation and reduction in a
 
 - **Bloat Estimation** — Analyze tables using PostgreSQL system catalogs (no `pgstattuple`)
 - **Non-blocking Reduction** — Reclaim space incrementally without exclusive locks
-- **Trigger & FK Safe** — UPDATE-based approach preserves triggers and foreign key constraints
+- **Trigger & FK Safe** — uses `session_replication_role = replica` (own session only)
 - **Multiple Modes** — Default (2 workers), fast (4 workers), or slow (1 worker with delay)
 - **Dry-run Support** — Preview changes before applying them
 - **JSON Output** — Machine-readable output for automation and monitoring
@@ -149,7 +149,7 @@ This approach:
 - **Is transaction-safe** — can be interrupted safely
 - **Works incrementally** — progress is preserved between runs
 - **Preserves row identity** — no DELETE/INSERT, sequences and references unchanged
-- **Trigger & FK safe** — UPDATE fires triggers correctly, foreign keys are preserved
+- **Trigger & FK safe** — uses `session_replication_role = replica` on its own session only; other sessions are unaffected
 
 ### Debloat Modes
 
