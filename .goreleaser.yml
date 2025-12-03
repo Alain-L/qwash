@@ -67,7 +67,7 @@ changelog:
 
 release:
   github:
-    owner: dalibo
+    owner: Alain-L
     name: qwash
   draft: false
   prerelease: auto
