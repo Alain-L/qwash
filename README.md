@@ -266,15 +266,15 @@ go test ./tests -run TestEstimate -v
 
 | Feature | VACUUM FULL | pg_repack | pgcompacttable | **qwash** |
 |---------|-------------|-----------|----------------|-----------|
-| Non-blocking | ❌ | ✅ | ✅ | ✅ |
-| No extension | ✅ | ❌ | ❌ (pgstattuple) | ✅ |
-| No dependencies | ✅ | ❌ | ❌ (Perl) | ✅ |
-| In-place (no copy) | ❌ | ❌ | ✅ | ✅ |
-| Incremental | ❌ | ❌ | ✅ | ✅ |
-| Trigger safe | ✅ | ❌ | ✅ | ✅ |
-| FK safe | ✅ | ❌ | ✅ | ✅ |
-| Built-in estimation | ❌ | ❌ | ❌ | ✅ |
-| Parallel workers | ❌ | ❌ | ❌ | ✅ |
+| Non-blocking | No | Yes | Yes | Yes |
+| No extension | Yes | No (pg_repack) | No (pgstattuple) | Yes |
+| No dependencies | Yes | Yes | No (DBD::Pg) | Yes |
+| In-place (no copy) | No | No | Yes | Yes |
+| Incremental | No | No | Yes | Yes |
+| Trigger safe | Yes | No | Yes | Yes |
+| FK safe | Yes | No | Yes | Yes |
+| Built-in estimation | No | No | No | Yes |
+| Parallel workers | No | No | No | Yes |
 
 **qwash** is the only tool that combines all these features in a single, standalone binary.
 
