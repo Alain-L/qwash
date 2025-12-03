@@ -24,29 +24,33 @@ qwash is a **standalone tool** that combines bloat estimation and reduction in a
 Download the latest release from [GitHub Releases](https://github.com/dalibo/qwash/releases):
 
 ```sh
+VERSION=0.2.0  # Check latest version on GitHub
+
 # Linux (amd64)
-curl -LO https://github.com/dalibo/qwash/releases/latest/download/qwash_Linux_amd64.tar.gz
-tar xzf qwash_Linux_amd64.tar.gz
+curl -LO https://github.com/dalibo/qwash/releases/download/v${VERSION}/qwash_${VERSION}_linux_amd64.tar.gz
+tar xzf qwash_${VERSION}_linux_amd64.tar.gz
 sudo mv qwash /usr/local/bin/
 
 # macOS (Apple Silicon)
-curl -LO https://github.com/dalibo/qwash/releases/latest/download/qwash_Darwin_arm64.tar.gz
-tar xzf qwash_Darwin_arm64.tar.gz
+curl -LO https://github.com/dalibo/qwash/releases/download/v${VERSION}/qwash_${VERSION}_darwin_arm64.tar.gz
+tar xzf qwash_${VERSION}_darwin_arm64.tar.gz
 sudo mv qwash /usr/local/bin/
 ```
 
 ### Debian/Ubuntu
 
 ```sh
-curl -LO https://github.com/dalibo/qwash/releases/latest/download/qwash_amd64.deb
-sudo dpkg -i qwash_amd64.deb
+VERSION=0.2.0
+curl -LO https://github.com/dalibo/qwash/releases/download/v${VERSION}/qwash_${VERSION}_amd64.deb
+sudo dpkg -i qwash_${VERSION}_amd64.deb
 ```
 
 ### RHEL/Rocky/Fedora
 
 ```sh
-curl -LO https://github.com/dalibo/qwash/releases/latest/download/qwash_amd64.rpm
-sudo rpm -i qwash_amd64.rpm
+VERSION=0.2.0
+curl -LO https://github.com/dalibo/qwash/releases/download/v${VERSION}/qwash_${VERSION}_amd64.rpm
+sudo rpm -i qwash_${VERSION}_amd64.rpm
 ```
 
 ### From source
