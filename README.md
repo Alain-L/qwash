@@ -21,18 +21,18 @@ qwash is a **standalone tool** that combines bloat estimation and reduction in a
 
 ### Pre-built binaries
 
-Download the latest release from [GitHub Releases](https://github.com/dalibo/qwash/releases):
+Download the latest release from [GitHub Releases](https://github.com/Alain-L/qwash/releases):
 
 ```sh
 VERSION=0.2.0  # Check latest version on GitHub
 
 # Linux (amd64)
-curl -LO https://github.com/dalibo/qwash/releases/download/v${VERSION}/qwash_${VERSION}_linux_amd64.tar.gz
+curl -LO https://github.com/Alain-L/qwash/releases/download/v${VERSION}/qwash_${VERSION}_linux_amd64.tar.gz
 tar xzf qwash_${VERSION}_linux_amd64.tar.gz
 sudo mv qwash /usr/local/bin/
 
 # macOS (Apple Silicon)
-curl -LO https://github.com/dalibo/qwash/releases/download/v${VERSION}/qwash_${VERSION}_darwin_arm64.tar.gz
+curl -LO https://github.com/Alain-L/qwash/releases/download/v${VERSION}/qwash_${VERSION}_darwin_arm64.tar.gz
 tar xzf qwash_${VERSION}_darwin_arm64.tar.gz
 sudo mv qwash /usr/local/bin/
 ```
@@ -41,7 +41,7 @@ sudo mv qwash /usr/local/bin/
 
 ```sh
 VERSION=0.2.0
-curl -LO https://github.com/dalibo/qwash/releases/download/v${VERSION}/qwash_${VERSION}_amd64.deb
+curl -LO https://github.com/Alain-L/qwash/releases/download/v${VERSION}/qwash_${VERSION}_amd64.deb
 sudo dpkg -i qwash_${VERSION}_amd64.deb
 ```
 
@@ -49,14 +49,14 @@ sudo dpkg -i qwash_${VERSION}_amd64.deb
 
 ```sh
 VERSION=0.2.0
-curl -LO https://github.com/dalibo/qwash/releases/download/v${VERSION}/qwash_${VERSION}_amd64.rpm
+curl -LO https://github.com/Alain-L/qwash/releases/download/v${VERSION}/qwash_${VERSION}_amd64.rpm
 sudo rpm -i qwash_${VERSION}_amd64.rpm
 ```
 
 ### From source
 
 ```sh
-git clone https://github.com/dalibo/qwash.git
+git clone https://github.com/Alain-L/qwash.git
 cd qwash
 go build -o bin/qwash
 ```
