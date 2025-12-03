@@ -37,8 +37,8 @@ archives:
 nfpms:
   - id: qwash
     package_name: qwash
-    vendor: Dalibo
-    homepage: https://github.com/dalibo/qwash
+    vendor: Alain Lesage
+    homepage: https://github.com/Alain-L/qwash
     maintainer: Alain Lesage <alain.lesage@dalibo.com>
     description: PostgreSQL bloat analysis and reduction tool
     license: PostgreSQL
