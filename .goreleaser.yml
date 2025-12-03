@@ -1,0 +1,70 @@
+project_name: qwash
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: qwash
+    binary: qwash
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
+archives:
+  - id: qwash
+    format: tar.gz
+    format_overrides:
+      - goos: windows
+        format: zip
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+nfpms:
+  - id: qwash
+    package_name: qwash
+    vendor: Dalibo
+    homepage: https://github.com/dalibo/qwash
+    maintainer: Alain Lesage <alain.lesage@dalibo.com>
+    description: PostgreSQL bloat analysis and reduction tool
+    license: PostgreSQL
+    formats:
+      - deb
+      - rpm
+    bindir: /usr/bin
+    contents:
+      - src: LICENSE
+        dst: /usr/share/doc/qwash/LICENSE
+      - src: README.md
+        dst: /usr/share/doc/qwash/README.md
+      - src: CHANGELOG.md
+        dst: /usr/share/doc/qwash/CHANGELOG.md
+
+checksum:
+  name_template: 'checksums.txt'
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+
+release:
+  github:
+    owner: dalibo
+    name: qwash
+  draft: false
+  prerelease: auto
