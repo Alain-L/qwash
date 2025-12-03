@@ -267,12 +267,12 @@ go test ./tests -run TestEstimate -v
 | Feature | VACUUM FULL | pg_repack | pgcompacttable | **qwash** |
 |---------|-------------|-----------|----------------|-----------|
 | Non-blocking | ❌ | ✅ | ✅ | ✅ |
-| No extension | ✅ | ❌ | ✅ | ✅ |
+| No extension | ✅ | ❌ | ❌ (pgstattuple) | ✅ |
 | No dependencies | ✅ | ❌ | ❌ (Perl) | ✅ |
 | In-place (no copy) | ❌ | ❌ | ✅ | ✅ |
 | Incremental | ❌ | ❌ | ✅ | ✅ |
-| Trigger safe | ✅ | ❌ | ❌ | ✅ |
-| FK safe | ✅ | ❌ | ❌ | ✅ |
+| Trigger safe | ✅ | ❌ | ✅ | ✅ |
+| FK safe | ✅ | ❌ | ✅ | ✅ |
 | Built-in estimation | ❌ | ❌ | ❌ | ✅ |
 | Parallel workers | ❌ | ❌ | ❌ | ✅ |
 
