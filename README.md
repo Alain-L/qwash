@@ -313,7 +313,9 @@ go test ./tests -run TestEstimate -v
 | Parallel workers | No | No | Yes | No | **Yes** |
 
 ¹ pg_squeeze requires `wal_level=logical` and `shared_preload_libraries`
+
 ² pgcompacttable requires the `pgstattuple` extension
+
 ³ pgcompacttable requires Perl with `DBD::Pg`
 
 **qwash** is the only tool that combines non-blocking operation, no extensions, no server configuration, and minimal disk space in a single binary.
