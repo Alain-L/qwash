@@ -299,19 +299,24 @@ go test ./tests -run TestEstimate -v
 
 ## Comparison with Alternatives
 
-| Feature | VACUUM FULL | pg_repack | pgcompacttable | **qwash** |
-|---------|-------------|-----------|----------------|-----------|
-| Non-blocking | No | Yes | Yes | **Yes** |
-| No extension | Yes | No (pg_repack) | No (pgstattuple) | **Yes** |
-| No dependencies | Yes | Yes | No (DBD::Pg) | **Yes** |
-| In-place (no copy) | No | No | Yes | **Yes** |
-| Incremental | No | No | Yes | **Yes** |
-| Trigger safe | Yes | No | Yes | **Yes** |
-| FK safe | Yes | No | Yes | **Yes** |
-| Built-in estimation | No | No | No | **Yes** |
-| Parallel workers | No | No | No | **Yes** |
+| Feature | VACUUM FULL | pg_repack | pg_squeeze | pgcompacttable | **qwash** |
+|---------|-------------|-----------|------------|----------------|-----------|
+| Non-blocking | No | Yes | Yes | Yes | **Yes** |
+| No extension | Yes | No | No | No² | **Yes** |
+| No server config | Yes | Yes | No¹ | Yes | **Yes** |
+| No dependencies | Yes | Yes | Yes | No³ | **Yes** |
+| In-place (no 2x space) | No | No | No | Yes | **Yes** |
+| Incremental | No | No | No | Yes | **Yes** |
+| Trigger safe | Yes | No | Yes | Yes | **Yes** |
+| FK safe | Yes | No | Yes | Yes | **Yes** |
+| Built-in estimation | No | No | No | No | **Yes** |
+| Parallel workers | No | No | Yes | No | **Yes** |
 
-**qwash** is the only tool that combines all these features in a single, standalone binary.
+¹ pg_squeeze requires `wal_level=logical` and `shared_preload_libraries`
+² pgcompacttable requires the `pgstattuple` extension
+³ pgcompacttable requires Perl with `DBD::Pg`
+
+**qwash** is the only tool that combines non-blocking operation, no extensions, no server configuration, and minimal disk space in a single binary.
 
 ## References
 
