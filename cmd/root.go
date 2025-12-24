@@ -46,6 +46,10 @@ var (
 	estimateFlag bool // --estimate (-E)
 	detailFlag   bool // --detail (-D)
 
+	// Target selection (what to analyze/debloat)
+	heapFlag  bool // --heap (default if neither specified)
+	toastFlag bool // --toast
+
 	// Debloat options
 	debloatFlag bool   // --debloat (-B)
 	fastFlag bool // --fast
@@ -117,6 +121,10 @@ func init() {
 		"Display a report of estimated bloat")
 	rootCmd.PersistentFlags().BoolVarP(&detailFlag, "detail", "D", false,
 		"Show detailed bloat analysis per table and index")
+	rootCmd.PersistentFlags().BoolVar(&heapFlag, "heap", false,
+		"Analyze heap bloat (default if neither --heap nor --toast specified)")
+	rootCmd.PersistentFlags().BoolVar(&toastFlag, "toast", false,
+		"Analyze TOAST bloat")
 
 	// Debloat options
 	rootCmd.PersistentFlags().BoolVarP(&debloatFlag, "debloat", "B", false,
@@ -210,6 +218,11 @@ func executeAnalysis(cmd *cobra.Command, args []string) {
 		estimateFlag = true
 	}
 
+	// Default to --heap if neither --heap nor --toast specified
+	if !heapFlag && !toastFlag {
+		heapFlag = true
+	}
+
 	// Step 2: Test database connection if requested
 	if testConnFlag {
 		if verboseFlag {
@@ -282,26 +295,57 @@ func runEstimate(connection *db.DB) {
 		if systemFlag {
 			fmt.Println("  Including system tables")
 		}
+		if heapFlag {
+			fmt.Println("  Heap bloat estimation")
+		}
+		if toastFlag {
+			fmt.Println("  TOAST bloat estimation")
+		}
 	}
 
-	// Analyze table bloat
-	tableBloat, err := analysis.DetectTableBloat(context.Background(), connection)
-	if err != nil {
-		log.Fatalf("Failed to analyze table bloat: %v", err)
+	// Analyze table (heap) bloat if --heap is enabled
+	var tableBloat []analysis.BloatTable
+	var err error
+	if heapFlag {
+		tableBloat, err = analysis.DetectTableBloat(context.Background(), connection)
+		if err != nil {
+			log.Fatalf("Failed to analyze table bloat: %v", err)
+		}
+	}
+
+	// Analyze TOAST bloat if --toast is enabled
+	var toastBloat []analysis.ToastBloat
+	if toastFlag {
+		toastBloat, err = analysis.DetectToastBloat(context.Background(), connection)
+		if err != nil {
+			log.Printf("[WARNING] Failed to analyze TOAST bloat: %v", err)
+			// Continue without TOAST data
+		}
 	}
 
 	// Filter by specific tables if -t is provided
 	if len(targetTables) > 0 {
-		filtered := filterTablesByName(tableBloat, targetTables)
-		if len(filtered) == 0 {
-			fmt.Printf("No matching tables found for: %v\n", targetTables)
-			return
-		}
 		// Detailed view for specific tables
 		if jsonFlag {
+			filtered := filterTablesByName(tableBloat, targetTables)
 			output.PrintBloatJSON(filtered, nil)
 		} else {
-			output.PrintDetailedBloat(filtered)
+			// Print heap bloat if enabled
+			if heapFlag {
+				filtered := filterTablesByName(tableBloat, targetTables)
+				if len(filtered) > 0 {
+					output.PrintDetailedBloat(filtered)
+				} else {
+					fmt.Printf("No matching tables found for: %v\n", targetTables)
+				}
+			}
+			// Print TOAST bloat if enabled
+			if toastFlag {
+				filteredToast := filterToastByName(toastBloat, targetTables)
+				if len(filteredToast) > 0 {
+					output.PrintDetailedToastBloat(filteredToast)
+				}
+			}
 		}
 		return
 	}
@@ -310,7 +354,14 @@ func runEstimate(connection *db.DB) {
 	if jsonFlag {
 		output.PrintBloatJSON(tableBloat, nil)
 	} else {
-		output.PrintBloatSummary(tableBloat, nil)
+		// Print heap bloat if enabled
+		if heapFlag && len(tableBloat) > 0 {
+			output.PrintBloatSummary(tableBloat, nil)
+		}
+		// Print TOAST bloat if enabled
+		if toastFlag && len(toastBloat) > 0 {
+			output.PrintToastBloatSummary(toastBloat)
+		}
 	}
 }
 
@@ -323,6 +374,22 @@ func filterTablesByName(tables []analysis.BloatTable, targetNames []string) []an
 			// Match full name (schema.table) or just table name
 			if fullName == target || tbl.TableName == target {
 				result = append(result, tbl)
+				break
+			}
+		}
+	}
+	return result
+}
+
+// filterToastByName filters TOAST bloat by table name (supports schema.table or just table)
+func filterToastByName(toastData []analysis.ToastBloat, targetNames []string) []analysis.ToastBloat {
+	var result []analysis.ToastBloat
+	for _, tb := range toastData {
+		fullName := fmt.Sprintf("%s.%s", tb.Schema, tb.TableName)
+		for _, target := range targetNames {
+			// Match full name (schema.table) or just table name
+			if fullName == target || tb.TableName == target {
+				result = append(result, tb)
 				break
 			}
 		}
