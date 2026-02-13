@@ -111,6 +111,64 @@ func createBloatedTable(t *testing.T, conn *db.DB, tableName string, rows int, d
 	}
 }
 
+// createBloatedToastTable creates a table with TOAST bloat for testing.
+// Uses ~10 KB TEXT values (STORAGE EXTERNAL) → ~5 chunks per value at 1996 bytes/chunk.
+// rows: total rows to insert (minimum ~2000 for reliable estimation above 10 MB threshold)
+// deletePercent: percentage of rows to delete (e.g., 50 means delete 50%)
+func createBloatedToastTable(t *testing.T, conn *db.DB, tableName string, rows int, deletePercent int) {
+	ctx := context.Background()
+
+	// Drop if exists
+	_, err := conn.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", tableName))
+	if err != nil {
+		t.Fatalf("Failed to drop table: %v", err)
+	}
+
+	// Create table with a TEXT column and autovacuum disabled
+	_, err = conn.Exec(ctx, fmt.Sprintf(`
+		CREATE TABLE %s (
+			id SERIAL PRIMARY KEY,
+			data TEXT
+		) WITH (autovacuum_enabled = false)
+	`, tableName))
+	if err != nil {
+		t.Fatalf("Failed to create table: %v", err)
+	}
+
+	// Force external storage (no compression) for predictable chunk sizes
+	_, err = conn.Exec(ctx, fmt.Sprintf(
+		"ALTER TABLE %s ALTER COLUMN data SET STORAGE EXTERNAL", tableName))
+	if err != nil {
+		t.Fatalf("Failed to set storage external: %v", err)
+	}
+
+	// Insert ~10 KB per row → 5 chunks per value (1996 bytes each + 1 partial)
+	_, err = conn.Exec(ctx, fmt.Sprintf(`
+		INSERT INTO %s (data)
+		SELECT repeat('abcdefghij', 1000) || '_' || g
+		FROM generate_series(1, %d) g
+	`, tableName, rows))
+	if err != nil {
+		t.Fatalf("Failed to insert data: %v", err)
+	}
+
+	// Delete specific rows to create TOAST bloat
+	if deletePercent > 0 {
+		_, err = conn.Exec(ctx, fmt.Sprintf(`
+			DELETE FROM %s WHERE id %% 100 < %d
+		`, tableName, deletePercent))
+		if err != nil {
+			t.Fatalf("Failed to delete rows: %v", err)
+		}
+	}
+
+	// VACUUM to update pg_class stats for TOAST table (ANALYZE alone doesn't work for TOAST)
+	_, err = conn.Exec(ctx, fmt.Sprintf("VACUUM %s", tableName))
+	if err != nil {
+		t.Fatalf("Failed to vacuum table: %v", err)
+	}
+}
+
 // getBloatPages returns the estimated bloat pages for a table
 func getBloatPages(t *testing.T, conn *db.DB, tableName string) int {
 	pages, err := conn.GetBloatPages(tableName)
