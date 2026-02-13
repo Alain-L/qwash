@@ -12,7 +12,11 @@ import (
 // toastBloatQuery is the main query without the helper function creation.
 // The helper function is created separately and dropped after use.
 const toastBloatQuery = `
-WITH toast_stats AS (
+WITH bs AS (
+  SELECT current_setting('block_size')::int AS block_size
+),
+
+toast_stats AS (
   SELECT
     ns.nspname AS schemaname,
     main.relname AS table_name,
@@ -20,12 +24,20 @@ WITH toast_stats AS (
     toast.relname AS toast_relname,
     toast.relpages AS toast_pages,
     toast.reltuples::bigint AS toast_chunks,
-    (toast.relpages * 8192)::bigint AS toast_bytes
+    (toast.relpages * bs.block_size)::bigint AS toast_bytes,
+    COALESCE(
+      GREATEST(st.last_vacuum, st.last_autovacuum),
+      '1970-01-01'::timestamptz
+    ) < now() - interval '24 hours' AS stale_stats
   FROM pg_class main
   JOIN pg_namespace ns ON ns.oid = main.relnamespace
   JOIN pg_class toast ON toast.oid = main.reltoastrelid
+  LEFT JOIN pg_stat_user_tables st
+    ON st.relid = main.oid
+  CROSS JOIN bs
   WHERE main.relkind IN ('r', 'm')
     AND ns.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND toast.relpages > 0
 ),
 
 bloat_calc AS (
@@ -37,9 +49,11 @@ bloat_calc AS (
     toast_pages,
     toast_chunks,
     toast_bytes,
+    stale_stats,
     toast_pages::numeric / NULLIF(toast_chunks, 0) AS ppc,
-    (_qwash_sample_chunk_size(main_oid) + 50)::numeric / 8192 AS ppc_ref,
-    toast_pages >= 1250 AS is_reliable
+    (pg_temp._qwash_sample_chunk_size(main_oid) + 50)::numeric
+      / (SELECT block_size FROM bs) AS ppc_ref,
+    toast_pages >= 10 * 1024 * 1024 / (SELECT block_size FROM bs) AS is_reliable
   FROM toast_stats
 )
 
@@ -62,22 +76,33 @@ SELECT
     WHEN NOT is_reliable THEN '< 10 MB'
     WHEN ppc_ref IS NULL THEN 'no chunks'
     ELSE NULL
-  END AS warning
+  END AS warning,
+  stale_stats
 FROM bloat_calc
 ORDER BY bloat_pct DESC NULLS LAST, toast_bytes DESC
 `
 
-// createHelperFunctionSQL creates a temporary function to sample chunk size
+// createHelperFunctionSQL creates a session-scoped temporary function to sample chunk size.
+// Using pg_temp schema ensures automatic cleanup when the session ends, even on crash.
+// Prefers chunk_seq > 0 to avoid partial last-chunks, falls back to any chunk.
 const createHelperFunctionSQL = `
-CREATE OR REPLACE FUNCTION _qwash_sample_chunk_size(main_table_oid oid)
+CREATE OR REPLACE FUNCTION pg_temp._qwash_sample_chunk_size(main_table_oid oid)
 RETURNS integer AS $$
 DECLARE
   chunk_size integer;
 BEGIN
+  -- Try a non-first chunk (guaranteed full-size for multi-chunk values)
   EXECUTE format(
-    'SELECT length(chunk_data) FROM pg_toast.pg_toast_%s LIMIT 1',
+    'SELECT length(chunk_data) FROM pg_toast.pg_toast_%s WHERE chunk_seq > 0 LIMIT 1',
     main_table_oid
   ) INTO chunk_size;
+  -- Fallback: single-chunk values (chunk_seq=0 only), still full-size
+  IF chunk_size IS NULL THEN
+    EXECUTE format(
+      'SELECT length(chunk_data) FROM pg_toast.pg_toast_%s LIMIT 1',
+      main_table_oid
+    ) INTO chunk_size;
+  END IF;
   RETURN chunk_size;
 EXCEPTION WHEN OTHERS THEN
   RETURN NULL;
@@ -85,8 +110,9 @@ END;
 $$ LANGUAGE plpgsql
 `
 
-// dropHelperFunctionSQL removes the temporary function
-const dropHelperFunctionSQL = `DROP FUNCTION IF EXISTS _qwash_sample_chunk_size(oid)`
+// dropHelperFunctionSQL removes the temporary function.
+// Redundant with pg_temp auto-cleanup but kept for explicit cleanup within the session.
+const dropHelperFunctionSQL = `DROP FUNCTION IF EXISTS pg_temp._qwash_sample_chunk_size(oid)`
 
 // DetectToastBloat analyzes TOAST table bloat using the ppc algorithm.
 // Requires recent VACUUM (not just ANALYZE) for accurate pg_class stats.
@@ -118,13 +144,14 @@ func DetectToastBloat(ctx context.Context, dbConn *db.DB) ([]ToastBloat, error) 
 
 	for rows.Next() {
 		var (
-			tableName   string
-			toastBytes  int64
-			toastPages  int
+			tableName  string
+			toastBytes int64
+			toastPages int
 			toastChunks int64
-			bloatPct    *float64
-			bloatSize   *int64
-			warning     *string
+			bloatPct   *float64
+			bloatSize  *int64
+			warning    *string
+			staleStats bool
 		)
 
 		err := rows.Scan(
@@ -135,6 +162,7 @@ func DetectToastBloat(ctx context.Context, dbConn *db.DB) ([]ToastBloat, error) 
 			&bloatPct,
 			&bloatSize,
 			&warning,
+			&staleStats,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("error scanning row: %w", err)
@@ -158,6 +186,7 @@ func DetectToastBloat(ctx context.Context, dbConn *db.DB) ([]ToastBloat, error) 
 			ToastPages:  toastPages,
 			ToastChunks: toastChunks,
 			BloatPct:    bloatPct,
+			StaleStats:  staleStats,
 		}
 
 		if bloatSize != nil {

@@ -278,24 +278,31 @@ func PrintToastBloatSummary(toastBloat []analysis.ToastBloat) {
 	sort.Slice(medium, func(i, j int) bool { return *medium[i].BloatPct > *medium[j].BloatPct })
 
 	// Print CRITICAL bloat section
+	hasStaleStats := false
 	if len(critical) > 0 {
 		fmt.Println(bold("CRITICAL BLOAT") + " (≥ 50%)")
 		fmt.Println()
-		printToastBloatTable(critical)
+		if printToastBloatTable(critical) {
+			hasStaleStats = true
+		}
 	}
 
 	// Print HIGH bloat section
 	if len(high) > 0 {
 		fmt.Println(bold("HIGH BLOAT") + " (30-50%)")
 		fmt.Println()
-		printToastBloatTable(high)
+		if printToastBloatTable(high) {
+			hasStaleStats = true
+		}
 	}
 
 	// Print MEDIUM bloat section
 	if len(medium) > 0 {
 		fmt.Println(bold("MEDIUM BLOAT") + " (10-30%)")
 		fmt.Println()
-		printToastBloatTable(medium)
+		if printToastBloatTable(medium) {
+			hasStaleStats = true
+		}
 	}
 
 	// No bloat message
@@ -303,6 +310,13 @@ func PrintToastBloatSummary(toastBloat []analysis.ToastBloat) {
 		fmt.Println(bold("NO SIGNIFICANT BLOAT DETECTED"))
 		fmt.Println()
 		fmt.Println("  All tables have TOAST bloat < 10%")
+		fmt.Println()
+	}
+
+	// Stale stats footnote
+	if hasStaleStats {
+		fmt.Println("  * No VACUUM in the last 24 hours — pg_class stats may be stale.")
+		fmt.Println("    Run VACUUM on these tables for accurate TOAST bloat estimation.")
 		fmt.Println()
 	}
 
@@ -334,28 +348,37 @@ func PrintToastBloatSummary(toastBloat []analysis.ToastBloat) {
 	}
 }
 
-// printToastBloatTable prints a table of TOAST bloat entries with totals
-func printToastBloatTable(entries []analysis.ToastBloat) {
+// printToastBloatTable prints a table of TOAST bloat entries with totals.
+// Returns true if any entry has stale stats.
+func printToastBloatTable(entries []analysis.ToastBloat) bool {
 	fmt.Printf("  %-40s %12s %12s %10s\n", "Table", "TOAST Size", "Bloat", "Bloat %")
 	fmt.Println("  " + repeatString("-", 81))
 
 	var totalBloat int64
+	hasStale := false
 	for _, tb := range entries {
 		tableName := fmt.Sprintf("%s.%s", tb.Schema, tb.TableName)
 		if len(tableName) > 40 {
 			tableName = tableName[:37] + "..."
 		}
-		fmt.Printf("  %-40s %12s %12s %9.2f%%\n",
+		staleMarker := ""
+		if tb.StaleStats {
+			staleMarker = " *"
+			hasStale = true
+		}
+		fmt.Printf("  %-40s %12s %12s %9.2f%%%s\n",
 			tableName,
 			FormatSize(tb.ToastSize),
 			FormatSize(tb.BloatSize),
 			*tb.BloatPct,
+			staleMarker,
 		)
 		totalBloat += tb.BloatSize
 	}
 	fmt.Println()
 	fmt.Printf("  Total: %d tables | %s bloat reclaimable\n", len(entries), FormatSize(totalBloat))
 	fmt.Println()
+	return hasStale
 }
 
 // PrintDetailedToastBloat displays detailed TOAST bloat information for specific tables
@@ -384,6 +407,9 @@ func PrintDetailedToastBloat(toastData []analysis.ToastBloat) {
 
 		fmt.Printf("  Pages       : %d\n", tb.ToastPages)
 		fmt.Printf("  Chunks      : %d\n", tb.ToastChunks)
+		if tb.StaleStats {
+			fmt.Printf("  Warning     : no VACUUM in the last 24h, stats may be stale\n")
+		}
 		fmt.Println()
 
 		// Separator between tables (except for the last one)
