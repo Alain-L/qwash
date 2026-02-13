@@ -187,6 +187,77 @@ func TestToastEstimateCLI(t *testing.T) {
 	}
 }
 
+// TestToastEstimateTwoChunkValues tests estimation accuracy for values with exactly 2 chunks.
+// This is a regression test: with 2-chunk values, chunk_seq=1 is the partial last chunk,
+// NOT a full-size chunk. The sampling must correctly pick chunk_seq=0 of a multi-chunk value.
+func TestToastEstimateTwoChunkValues(t *testing.T) {
+	conn := setupTestDB(t)
+	defer conn.Close()
+
+	tableName := "toast_est_2chunk"
+	ctx := context.Background()
+
+	// Create table with ~3KB values → 2 chunks per value (1996 + ~1009)
+	_, err := conn.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", tableName))
+	if err != nil {
+		t.Fatalf("Failed to drop table: %v", err)
+	}
+	_, err = conn.Exec(ctx, fmt.Sprintf(`
+		CREATE TABLE %s (
+			id SERIAL PRIMARY KEY,
+			data TEXT
+		) WITH (autovacuum_enabled = false)
+	`, tableName))
+	if err != nil {
+		t.Fatalf("Failed to create table: %v", err)
+	}
+	_, err = conn.Exec(ctx, fmt.Sprintf(
+		"ALTER TABLE %s ALTER COLUMN data SET STORAGE EXTERNAL", tableName))
+	if err != nil {
+		t.Fatalf("Failed to set storage: %v", err)
+	}
+	// ~3005 bytes per value → chunk_seq 0 = 1996 bytes, chunk_seq 1 = ~1009 bytes
+	_, err = conn.Exec(ctx, fmt.Sprintf(`
+		INSERT INTO %s (data)
+		SELECT repeat('x', 3000) || '_' || g
+		FROM generate_series(1, 10000) g
+	`, tableName))
+	if err != nil {
+		t.Fatalf("Failed to insert data: %v", err)
+	}
+	// No deletions → 0% bloat expected
+	_, err = conn.Exec(ctx, fmt.Sprintf("VACUUM %s", tableName))
+	if err != nil {
+		t.Fatalf("Failed to vacuum: %v", err)
+	}
+
+	results, err := analysis.DetectToastBloat(ctx, conn)
+	if err != nil {
+		t.Fatalf("DetectToastBloat failed: %v", err)
+	}
+
+	tb := findToastResult(t, results, tableName)
+	if tb == nil {
+		t.Fatalf("Table %s not found in TOAST results", tableName)
+	}
+
+	t.Logf("Table %s: toast_size=%d pages=%d chunks=%d bloat_pct=%v",
+		tableName, tb.ToastSize, tb.ToastPages, tb.ToastChunks, pctStr(tb.BloatPct))
+
+	if tb.BloatPct == nil {
+		t.Fatalf("Expected bloat percentage, got nil (warning: %s)", tb.Warning)
+	}
+
+	// With 0 deletions, bloat should be < 8% (baseline overhead only)
+	// Regression: old chunk_seq > 0 sampling returned partial last chunk (1009 bytes instead of 1996)
+	// which caused a false-positive ~48% bloat estimate
+	if *tb.BloatPct > 8 {
+		t.Errorf("Expected bloat < 8%% for non-bloated 2-chunk table, got %.1f%% "+
+			"(possible chunk sampling regression: partial last chunk sampled instead of full-size chunk)",
+			*tb.BloatPct)
+	}
+}
+
 // TestToastEstimateChunkSampling verifies that chunk sampling returns full-size chunks
 func TestToastEstimateChunkSampling(t *testing.T) {
 	conn := setupTestDB(t)

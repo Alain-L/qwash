@@ -9,25 +9,41 @@
 
 -- Helper function: sample one full-size chunk to get its size
 -- Required because TOAST table names are dynamic (pg_toast.pg_toast_<OID>)
--- Prefers chunk_seq > 0 (guaranteed full-size), falls back to any chunk
+--
+-- Sampling strategy for multi-chunk values:
+--   1. Find a chunk_id that has chunk_seq > 0 (proves it's a multi-chunk value)
+--   2. Read chunk_seq = 0 of that value (always exactly TOAST_MAX_CHUNK_SIZE = 1996 on 8kB)
+--   Note: chunk_seq > 0 alone is NOT safe — for 2-chunk values, chunk_seq=1 is the
+--   partial last chunk, not a full-size chunk.
+--
+-- Fallback for single-chunk-only tables: any chunk is representative.
 -- Note: in qwash, this function is created in pg_temp schema for auto-cleanup
 CREATE OR REPLACE FUNCTION _qwash_sample_chunk_size(main_table_oid oid)
 RETURNS integer AS $$
 DECLARE
   chunk_size integer;
+  multi_cid oid;
 BEGIN
-  -- Try a non-first chunk (guaranteed full-size for multi-chunk values)
+  -- Find a multi-chunk value (any chunk_id that has chunk_seq > 0)
   EXECUTE format(
-    'SELECT length(chunk_data) FROM pg_toast.pg_toast_%s WHERE chunk_seq > 0 LIMIT 1',
+    'SELECT chunk_id FROM pg_toast.pg_toast_%s WHERE chunk_seq > 0 LIMIT 1',
     main_table_oid
-  ) INTO chunk_size;
-  -- Fallback: single-chunk values (chunk_seq=0 only), still full-size
-  IF chunk_size IS NULL THEN
+  ) INTO multi_cid;
+
+  IF multi_cid IS NOT NULL THEN
+    -- Read chunk_seq = 0 of that multi-chunk value (guaranteed full-size)
+    EXECUTE format(
+      'SELECT length(chunk_data) FROM pg_toast.pg_toast_%s WHERE chunk_id = %s AND chunk_seq = 0',
+      main_table_oid, multi_cid
+    ) INTO chunk_size;
+  ELSE
+    -- All values are single-chunk: any chunk is representative
     EXECUTE format(
       'SELECT length(chunk_data) FROM pg_toast.pg_toast_%s LIMIT 1',
       main_table_oid
     ) INTO chunk_size;
   END IF;
+
   RETURN chunk_size;
 EXCEPTION WHEN OTHERS THEN
   RETURN NULL;

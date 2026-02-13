@@ -84,25 +84,41 @@ ORDER BY bloat_pct DESC NULLS LAST, toast_bytes DESC
 
 // createHelperFunctionSQL creates a session-scoped temporary function to sample chunk size.
 // Using pg_temp schema ensures automatic cleanup when the session ends, even on crash.
-// Prefers chunk_seq > 0 to avoid partial last-chunks, falls back to any chunk.
+//
+// Sampling strategy for multi-chunk values:
+//   1. Find a chunk_id that has chunk_seq > 0 (proves it's a multi-chunk value)
+//   2. Read chunk_seq = 0 of that value (always exactly TOAST_MAX_CHUNK_SIZE = 1996 on 8kB)
+//   Note: chunk_seq > 0 alone is NOT safe — for 2-chunk values, chunk_seq=1 is the
+//   partial last chunk, not a full-size chunk.
+//
+// Fallback for single-chunk-only tables: any chunk is representative.
 const createHelperFunctionSQL = `
 CREATE OR REPLACE FUNCTION pg_temp._qwash_sample_chunk_size(main_table_oid oid)
 RETURNS integer AS $$
 DECLARE
   chunk_size integer;
+  multi_cid oid;
 BEGIN
-  -- Try a non-first chunk (guaranteed full-size for multi-chunk values)
+  -- Find a multi-chunk value (any chunk_id that has chunk_seq > 0)
   EXECUTE format(
-    'SELECT length(chunk_data) FROM pg_toast.pg_toast_%s WHERE chunk_seq > 0 LIMIT 1',
+    'SELECT chunk_id FROM pg_toast.pg_toast_%s WHERE chunk_seq > 0 LIMIT 1',
     main_table_oid
-  ) INTO chunk_size;
-  -- Fallback: single-chunk values (chunk_seq=0 only), still full-size
-  IF chunk_size IS NULL THEN
+  ) INTO multi_cid;
+
+  IF multi_cid IS NOT NULL THEN
+    -- Read chunk_seq = 0 of that multi-chunk value (guaranteed full-size)
+    EXECUTE format(
+      'SELECT length(chunk_data) FROM pg_toast.pg_toast_%s WHERE chunk_id = %s AND chunk_seq = 0',
+      main_table_oid, multi_cid
+    ) INTO chunk_size;
+  ELSE
+    -- All values are single-chunk: any chunk is representative
     EXECUTE format(
       'SELECT length(chunk_data) FROM pg_toast.pg_toast_%s LIMIT 1',
       main_table_oid
     ) INTO chunk_size;
   END IF;
+
   RETURN chunk_size;
 EXCEPTION WHEN OTHERS THEN
   RETURN NULL;
