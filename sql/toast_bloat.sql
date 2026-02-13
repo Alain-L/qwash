@@ -83,17 +83,14 @@ bloat_calc AS (
   SELECT
     schemaname,
     table_name,
-    main_oid,
-    toast_relname,
     toast_pages,
     toast_chunks,
     toast_bytes,
     stale_stats,
-    -- ppc = pages per chunk (current ratio)
-    toast_pages::numeric / NULLIF(toast_chunks, 0) AS ppc,
-    -- ppc_ref from sampled chunk: (chunk_size + 50 overhead) / block_size
-    (_qwash_sample_chunk_size(main_oid) + 50)::numeric
-      / (SELECT block_size FROM bs) AS ppc_ref,
+    -- Minimum pages required to store live chunks (theoretical, no bloat)
+    -- ppc_ref = (sampled_chunk_size + 50 overhead) / block_size
+    CEIL(toast_chunks * (_qwash_sample_chunk_size(main_oid) + 50)::numeric
+      / (SELECT block_size FROM bs))::bigint AS min_pages_required,
     -- Reliability threshold: 10 MB
     toast_pages >= 10 * 1024 * 1024 / (SELECT block_size FROM bs) AS is_reliable
   FROM toast_stats
@@ -104,26 +101,30 @@ SELECT
   pg_size_pretty(toast_bytes) AS toast_size,
   toast_pages,
   toast_chunks,
-  ROUND(ppc::numeric, 4) AS ppc,
-  ROUND(ppc_ref::numeric, 4) AS ppc_ref,
-  -- Bloat estimation (NULL if < 10 MB or no ppc_ref)
+  min_pages_required,
+  -- Bloat estimation (NULL if < 10 MB or no chunk data)
   CASE
     WHEN NOT is_reliable THEN NULL
-    WHEN ppc_ref IS NULL THEN NULL
-    ELSE ROUND(GREATEST(0, (1 - ppc_ref / ppc) * 100)::numeric, 1)
+    WHEN min_pages_required IS NULL THEN NULL
+    ELSE GREATEST(0, toast_pages - min_pages_required)
+  END AS bloat_pages,
+  CASE
+    WHEN NOT is_reliable THEN NULL
+    WHEN min_pages_required IS NULL THEN NULL
+    ELSE ROUND(GREATEST(0, 100.0 * (toast_pages - min_pages_required)
+      / toast_pages)::numeric, 1)
   END AS bloat_pct,
-  -- Estimated bloat size
   CASE
     WHEN NOT is_reliable THEN NULL
-    WHEN ppc_ref IS NULL THEN NULL
+    WHEN min_pages_required IS NULL THEN NULL
     ELSE pg_size_pretty(
-      (GREATEST(0, (1 - ppc_ref / ppc)) * toast_bytes)::bigint
+      (GREATEST(0, toast_pages - min_pages_required) * (SELECT block_size FROM bs))::bigint
     )
   END AS bloat_size,
   -- Status/warning
   CASE
     WHEN NOT is_reliable THEN '< 10 MB'
-    WHEN ppc_ref IS NULL THEN 'no chunks'
+    WHEN min_pages_required IS NULL THEN 'no chunks'
     ELSE NULL
   END AS warning,
   stale_stats
