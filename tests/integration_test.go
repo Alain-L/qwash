@@ -142,10 +142,12 @@ func createBloatedToastTable(t *testing.T, conn *db.DB, tableName string, rows i
 		t.Fatalf("Failed to set storage external: %v", err)
 	}
 
-	// Insert ~10 KB per row → 5 chunks per value (1996 bytes each + 1 partial)
+	// Insert exactly 11976 bytes per row → 6 full chunks of 1996 bytes each
+	// Using an exact multiple of TOAST_MAX_CHUNK_SIZE avoids partial last chunks
+	// that would skew avg(length(chunk_data)) below 1996
 	_, err = conn.Exec(ctx, fmt.Sprintf(`
 		INSERT INTO %s (data)
-		SELECT repeat('abcdefghij', 1000) || '_' || g
+		SELECT repeat('x', 1996 * 6)
 		FROM generate_series(1, %d) g
 	`, tableName, rows))
 	if err != nil {

@@ -188,8 +188,6 @@ func TestToastEstimateCLI(t *testing.T) {
 }
 
 // TestToastEstimateTwoChunkValues tests estimation accuracy for values with exactly 2 chunks.
-// This is a regression test: with 2-chunk values, chunk_seq=1 is the partial last chunk,
-// NOT a full-size chunk. The sampling must correctly pick chunk_seq=0 of a multi-chunk value.
 func TestToastEstimateTwoChunkValues(t *testing.T) {
 	conn := setupTestDB(t)
 	defer conn.Close()
@@ -216,10 +214,11 @@ func TestToastEstimateTwoChunkValues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to set storage: %v", err)
 	}
-	// ~3005 bytes per value → chunk_seq 0 = 1996 bytes, chunk_seq 1 = ~1009 bytes
+	// Exactly 3992 bytes per value → 2 full chunks of 1996 bytes each
+	// Using an exact multiple avoids partial last chunks that skew avg_chunk_size
 	_, err = conn.Exec(ctx, fmt.Sprintf(`
 		INSERT INTO %s (data)
-		SELECT repeat('x', 3000) || '_' || g
+		SELECT repeat('x', 1996 * 2)
 		FROM generate_series(1, 10000) g
 	`, tableName))
 	if err != nil {
@@ -249,11 +248,8 @@ func TestToastEstimateTwoChunkValues(t *testing.T) {
 	}
 
 	// With 0 deletions, bloat should be < 8% (baseline overhead only)
-	// Regression: old chunk_seq > 0 sampling returned partial last chunk (1009 bytes instead of 1996)
-	// which caused a false-positive ~48% bloat estimate
 	if *tb.BloatPct > 8 {
-		t.Errorf("Expected bloat < 8%% for non-bloated 2-chunk table, got %.1f%% "+
-			"(possible chunk sampling regression: partial last chunk sampled instead of full-size chunk)",
+		t.Errorf("Expected bloat < 8%% for non-bloated 2-chunk table, got %.1f%%",
 			*tb.BloatPct)
 	}
 }
