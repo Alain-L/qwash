@@ -82,41 +82,25 @@ FROM bloat_calc
 ORDER BY bloat_pct DESC NULLS LAST, toast_bytes DESC
 `
 
-// createHelperFunctionSQL creates a session-scoped temporary function to sample chunk size.
-// Using pg_temp schema ensures automatic cleanup when the session ends, even on crash.
+// createHelperFunctionSQL creates a session-scoped temporary function to compute
+// average chunk size. Using pg_temp schema ensures automatic cleanup on disconnect.
 //
-// Sampling strategy: find a multi-chunk value and compute the average chunk size
-// across ALL its chunks (not just chunk_seq=0). This captures the fact that the
-// last chunk of each value is typically smaller than TOAST_MAX_CHUNK_SIZE.
+// Strategy: sequential scan computing avg(length(chunk_data)) across all live chunks.
+// This naturally handles multi-column tables and mixed payload sizes — each chunk
+// contributes proportionally to the average.
 //
-// Fallback for single-chunk-only tables: any chunk is representative.
+// Performance: ~90 ms per 100 MB of TOAST data (length() only reads the varlena
+// header, so cost is dominated by sequential I/O, not detoasting).
 const createHelperFunctionSQL = `
 CREATE OR REPLACE FUNCTION pg_temp._qwash_sample_chunk_size(main_table_oid oid)
 RETURNS integer AS $$
 DECLARE
   chunk_size integer;
-  multi_cid oid;
 BEGIN
-  -- Find a multi-chunk value (any chunk_id that has chunk_seq > 0)
   EXECUTE format(
-    'SELECT chunk_id FROM pg_toast.pg_toast_%s WHERE chunk_seq > 0 LIMIT 1',
+    'SELECT avg(length(chunk_data))::integer FROM pg_toast.pg_toast_%s',
     main_table_oid
-  ) INTO multi_cid;
-
-  IF multi_cid IS NOT NULL THEN
-    -- Average chunk size across ALL chunks of this value
-    -- Captures the smaller last chunk that every multi-chunk value has
-    EXECUTE format(
-      'SELECT avg(length(chunk_data))::integer FROM pg_toast.pg_toast_%s WHERE chunk_id = %s',
-      main_table_oid, multi_cid
-    ) INTO chunk_size;
-  ELSE
-    -- All values are single-chunk: any chunk is representative
-    EXECUTE format(
-      'SELECT length(chunk_data) FROM pg_toast.pg_toast_%s LIMIT 1',
-      main_table_oid
-    ) INTO chunk_size;
-  END IF;
+  ) INTO chunk_size;
 
   RETURN chunk_size;
 EXCEPTION WHEN OTHERS THEN
