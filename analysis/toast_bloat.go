@@ -85,11 +85,9 @@ ORDER BY bloat_pct DESC NULLS LAST, toast_bytes DESC
 // createHelperFunctionSQL creates a session-scoped temporary function to sample chunk size.
 // Using pg_temp schema ensures automatic cleanup when the session ends, even on crash.
 //
-// Sampling strategy for multi-chunk values:
-//   1. Find a chunk_id that has chunk_seq > 0 (proves it's a multi-chunk value)
-//   2. Read chunk_seq = 0 of that value (always exactly TOAST_MAX_CHUNK_SIZE = 1996 on 8kB)
-//   Note: chunk_seq > 0 alone is NOT safe — for 2-chunk values, chunk_seq=1 is the
-//   partial last chunk, not a full-size chunk.
+// Sampling strategy: find a multi-chunk value and compute the average chunk size
+// across ALL its chunks (not just chunk_seq=0). This captures the fact that the
+// last chunk of each value is typically smaller than TOAST_MAX_CHUNK_SIZE.
 //
 // Fallback for single-chunk-only tables: any chunk is representative.
 const createHelperFunctionSQL = `
@@ -106,9 +104,10 @@ BEGIN
   ) INTO multi_cid;
 
   IF multi_cid IS NOT NULL THEN
-    -- Read chunk_seq = 0 of that multi-chunk value (guaranteed full-size)
+    -- Average chunk size across ALL chunks of this value
+    -- Captures the smaller last chunk that every multi-chunk value has
     EXECUTE format(
-      'SELECT length(chunk_data) FROM pg_toast.pg_toast_%s WHERE chunk_id = %s AND chunk_seq = 0',
+      'SELECT avg(length(chunk_data))::integer FROM pg_toast.pg_toast_%s WHERE chunk_id = %s',
       main_table_oid, multi_cid
     ) INTO chunk_size;
   ELSE
