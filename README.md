@@ -9,7 +9,7 @@ qwash is a **standalone tool** that combines bloat estimation and reduction in a
 
 ## Features
 
-- **Bloat Estimation** — Analyze tables using PostgreSQL system catalogs (no `pgstattuple`)
+- **Bloat Estimation** — Analyze table and TOAST bloat using PostgreSQL system catalogs (no `pgstattuple`)
 - **Non-blocking Reduction** — Reclaim space incrementally without exclusive locks
 - **Trigger & FK Safe** — uses `session_replication_role = replica` (own session only)
 - **Multiple Modes** — Default (2 workers), fast (4 workers), or slow (1 worker with delay)
@@ -70,8 +70,14 @@ go build -o bin/qwash
 ### Estimate Bloat
 
 ```sh
-# Analyze all tables in a database
+# Analyze all tables in a database (heap bloat)
 ./bin/qwash --estimate -d mydb -U postgres -H localhost
+
+# Analyze TOAST bloat
+./bin/qwash --estimate --toast -d mydb
+
+# Analyze both heap and TOAST bloat
+./bin/qwash --estimate --heap --toast -d mydb
 
 # Analyze specific tables
 ./bin/qwash --estimate -d mydb -t mytable -t othertable
@@ -121,6 +127,8 @@ Connection:
 
 Analysis:
   -E, --estimate          Display bloat estimation report
+      --heap              Analyze heap (table) bloat (default if neither --heap nor --toast)
+      --toast             Analyze TOAST bloat
   -D, --detail            Show detailed analysis per table and index
   -t, --table strings     Target specific table(s)
   -n, --schema strings    Target specific schema(s)
@@ -169,6 +177,8 @@ qwash uses the [ioguix bloat estimation approach](https://github.com/ioguix/pgsq
 - **Minimum required pages** (calculated from live tuple count and average tuple size)
 
 The difference is the estimated bloat.
+
+**TOAST bloat** (`--toast`) uses a similar approach: it compares actual TOAST pages with the theoretical minimum based on live chunk count and `TOAST_MAX_CHUNK_SIZE`. Estimation is reliable for TOAST tables >= 10 MB and requires recent `VACUUM` for accurate stats. See [sql/toast_bloat.sql](sql/toast_bloat.sql) for the standalone query.
 
 ### Bloat Reduction Algorithm
 
@@ -219,6 +229,37 @@ CRITICAL BLOAT (≥ 50%)
 
   Total: 2 tables | 1.1 GB bloat reclaimable
 ```
+
+### Text Output (--estimate --toast)
+
+```
+qwash – 3 tables with TOAST analyzed
+
+TOAST BLOAT SUMMARY
+
+  Tables analyzed           : 3
+  Tables with bloat         : 1 (33.3%)
+
+  Total TOAST size          : 52.0 MB
+  Total bloat detected      : 27.4 MB (52.7%)
+  Reclaimable space         : 27.4 MB
+
+CRITICAL BLOAT (≥ 50%)
+
+  Table                                      TOAST Size        Bloat    Bloat %
+  ---------------------------------------------------------------------------------
+  public.messages                               39.1 MB      27.4 MB     70.00%
+
+  Total: 1 tables | 27.4 MB bloat reclaimable
+
+UNRELIABLE ESTIMATES (< 10 MB)
+
+  Table                                      TOAST Size        Bloat    Bloat %
+  ---------------------------------------------------------------------------------
+  public.small_table                           800.0 KB          N/A          -
+```
+
+TOAST bloat estimation requires recent `VACUUM` (not just `ANALYZE`) for accurate `pg_class` stats. Tables with TOAST data smaller than 10 MB are flagged as unreliable.
 
 ### Text Output (--estimate -t table)
 
