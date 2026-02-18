@@ -316,6 +316,24 @@ public.orders
 }
 ```
 
+### JSON Output (--estimate --toast --json)
+
+```json
+{
+  "toast": [
+    {
+      "schema": "public",
+      "table_name": "audit_log",
+      "toast_size": 40960000,
+      "toast_pages": 5000,
+      "toast_chunks": 8000,
+      "bloat_pct": 60,
+      "bloat_size": 24592000
+    }
+  ]
+}
+```
+
 ### JSON Output (--debloat --json)
 
 ```json

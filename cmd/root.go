@@ -327,8 +327,15 @@ func runEstimate(connection *db.DB) {
 	if len(targetTables) > 0 {
 		// Detailed view for specific tables
 		if jsonFlag {
-			filtered := filterTablesByName(tableBloat, targetTables)
-			output.PrintBloatJSON(filtered, nil)
+			var filtered []analysis.BloatTable
+			if heapFlag {
+				filtered = filterTablesByName(tableBloat, targetTables)
+			}
+			var filteredToast []analysis.ToastBloat
+			if toastFlag {
+				filteredToast = filterToastByName(toastBloat, targetTables)
+			}
+			output.PrintBloatJSON(filtered, nil, filteredToast)
 		} else {
 			// Print heap bloat if enabled
 			if heapFlag {
@@ -352,7 +359,7 @@ func runEstimate(connection *db.DB) {
 
 	// Display results based on output format
 	if jsonFlag {
-		output.PrintBloatJSON(tableBloat, nil)
+		output.PrintBloatJSON(tableBloat, nil, toastBloat)
 	} else {
 		// Print heap bloat if enabled
 		if heapFlag && len(tableBloat) > 0 {
