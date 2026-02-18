@@ -209,54 +209,71 @@ This approach:
 ### Text Output (--estimate)
 
 ```
-qwash – 3 tables analyzed
+qwash – 5 tables analyzed
 
 SUMMARY
 
-  Tables analyzed           : 3
-  Tables with bloat         : 2 (66.7%)
+  Tables analyzed           : 5
+  Tables with bloat         : 5 (100.0%)
 
-  Total database size       : 1.9 GB
-  Total bloat detected      : 1.1 GB (57.9%)
-  Reclaimable space         : 1.1 GB
+  Total database size       : 23.4 MB
+  Total bloat detected      : 12.3 MB (52.4%)
+  Reclaimable space         : 12.3 MB
 
 CRITICAL BLOAT (≥ 50%)
 
   Table                                            Size        Bloat    Bloat %
   ---------------------------------------------------------------------------------
-  public.orders                                   1.2 GB     892.0 MB     74.33%
-  public.order_items                            567.0 MB     234.0 MB     41.27%
+  public.orders                                 12.0 MB       8.8 MB     71.95%
+  public.audit_log                             296.0 KB     176.0 KB     59.46%
+  public.notifications                          16.0 KB       8.0 KB     50.00%
 
-  Total: 2 tables | 1.1 GB bloat reclaimable
+  Total: 3 tables | 9.0 MB bloat reclaimable
+
+HIGH BLOAT (30-50%)
+
+  Table                                            Size        Bloat    Bloat %
+  ---------------------------------------------------------------------------------
+  public.sessions                                8.1 MB       2.8 MB     35.11%
+
+  Total: 1 tables | 2.8 MB bloat reclaimable
+
+MEDIUM BLOAT (10-30%)
+
+  Table                                            Size        Bloat    Bloat %
+  ---------------------------------------------------------------------------------
+  public.products                                3.1 MB     440.0 KB     13.99%
+
+  Total: 1 tables | 440.0 KB bloat reclaimable
 ```
 
 ### Text Output (--estimate --toast)
 
 ```
-qwash – 3 tables with TOAST analyzed
+qwash – 2 tables with TOAST analyzed
 
 TOAST BLOAT SUMMARY
 
-  Tables analyzed           : 3
-  Tables with bloat         : 1 (33.3%)
+  Tables analyzed           : 2
+  Tables with bloat         : 1 (50.0%)
 
-  Total TOAST size          : 52.0 MB
-  Total bloat detected      : 27.4 MB (52.7%)
-  Reclaimable space         : 27.4 MB
+  Total TOAST size          : 39.8 MB
+  Total bloat detected      : 23.5 MB (58.9%)
+  Reclaimable space         : 23.5 MB
 
 CRITICAL BLOAT (≥ 50%)
 
   Table                                      TOAST Size        Bloat    Bloat %
   ---------------------------------------------------------------------------------
-  public.messages                               39.1 MB      27.4 MB     70.00%
+  public.audit_log                              39.1 MB      23.5 MB     60.00%
 
-  Total: 1 tables | 27.4 MB bloat reclaimable
+  Total: 1 tables | 23.5 MB bloat reclaimable
 
 UNRELIABLE ESTIMATES (< 10 MB)
 
   Table                                      TOAST Size        Bloat    Bloat %
   ---------------------------------------------------------------------------------
-  public.small_table                           800.0 KB          N/A          -
+  public.notifications                         800.0 KB          N/A          -
 ```
 
 TOAST bloat estimation requires recent `VACUUM` (not just `ANALYZE`) for accurate `pg_class` stats. Tables with TOAST data smaller than 10 MB are flagged as unreliable.
@@ -268,13 +285,13 @@ BLOAT ESTIMATION
 
 public.orders
 
-  Size        : 1.2 GB
-  Bloat       : 892.0 MB
-  Bloat %     : 74.33%
-  Pages       : 157286
-  Min pages   : 40384
-  Live tuples : 1250000
-  Dead tuples : 3750000
+  Size        : 12.0 MB
+  Bloat       : 8.8 MB
+  Bloat %     : 71.95%
+  Pages       : 1572
+  Min pages   : 441
+  Live tuples : 60000
+  Dead tuples : 0
   Fill factor : 100
 ```
 
@@ -286,17 +303,16 @@ public.orders
     {
       "schema": "public",
       "table_name": "orders",
-      "table_size": 1288490188,
-      "bloat_size": 935329792,
-      "bloat_ratio": 74.3,
-      "pages": 157286,
-      "min_pages": 40384,
-      "live_tuples": 1250000,
-      "dead_tuples": 3750000,
+      "table_size": 12582912,
+      "bloat_size": 9265152,
+      "bloat_ratio": 71.95,
+      "pages": 1572,
+      "min_pages": 441,
+      "live_tuples": 60000,
+      "dead_tuples": 0,
       "fill_factor": 100
     }
-  ],
-  "indexes": null
+  ]
 }
 ```
 

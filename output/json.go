@@ -9,7 +9,7 @@ import (
 // BloatReport represents the JSON output structure.
 type BloatReport struct {
 	Tables  []analysis.BloatTable `json:"tables"`
-	Indexes []analysis.BloatIndex `json:"indexes"`
+	Indexes []analysis.BloatIndex `json:"indexes,omitempty"`
 }
 
 // PrintBloatJSON exports the bloat analysis results in JSON format.
