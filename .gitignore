@@ -32,6 +32,7 @@ Thumbs.db
 *.swo
 *~
 CLAUDE.md
+TOAST_BLOAT_RESEARCH.md
 
 # Environment files
 .env
