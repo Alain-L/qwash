@@ -178,7 +178,7 @@ qwash uses the [ioguix bloat estimation approach](https://github.com/ioguix/pgsq
 
 The difference is the estimated bloat.
 
-**TOAST bloat** (`--toast`) uses a similar approach: it compares actual TOAST pages with the theoretical minimum based on live chunk count and `TOAST_MAX_CHUNK_SIZE`. Estimation is reliable for TOAST tables >= 10 MB and requires recent `VACUUM` for accurate stats. See [sql/toast_bloat.sql](sql/toast_bloat.sql) for the standalone query.
+**TOAST bloat** (`--toast`) uses a similar approach: it compares actual TOAST pages with the theoretical minimum based on live chunk count and average chunk size derived from `pg_column_size()` (no detoasting). Estimation is reliable for TOAST tables >= 10 MB and requires recent `VACUUM` for accurate stats. A [standalone query](sql/toast_bloat.sql) is available for DBA use without installing qwash.
 
 ### Bloat Reduction Algorithm
 

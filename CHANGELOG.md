@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2026-03-11
+
+### Added
+- **TOAST bloat estimation** (`--toast`): Analyze TOAST table bloat using system catalogs
+  - Precision within ~0.2% of pgstattuple for tables >= 10 MB
+  - Handles both EXTERNAL and EXTENDED (compressed) storage
+  - Unreliable estimates (< 10 MB) flagged with warning
+  - Stale stats detection (no VACUUM in 24h)
+- **Standalone TOAST query** (`sql/toast_bloat.sql`): DO block + cursor approach for DBA use without installing qwash
+- **`--heap` flag**: Explicitly select heap-only estimation (default when no flag specified)
+- **TOAST JSON output**: `--toast --json` includes TOAST bloat in JSON report
+- **TOAST integration tests**: 8 test cases covering all chunk profiles
+
 ## [0.2.0] - 2025-12-03
 
 ### Added
