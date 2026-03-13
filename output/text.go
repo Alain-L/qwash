@@ -303,8 +303,8 @@ func PrintIndexBloatSummary(indexes []analysis.BloatIndex) {
 	if len(unreliable) > 0 {
 		fmt.Println(bold("UNRELIABLE ESTIMATES") + " (is_na = true)")
 		fmt.Println()
-		fmt.Printf("  %-30s %-30s %10s %10s %10s %4s\n", "Index", "Table", "Size", "Bloat", "Bloat %", "FF")
-		fmt.Println("  " + repeatString("-", 100))
+		fmt.Printf("  %-30s %-30s %10s %10s %10s\n", "Index", "Table", "Size", "Bloat", "Bloat %")
+		fmt.Println("  " + repeatString("-", 96))
 		for _, idx := range unreliable {
 			idxName := fmt.Sprintf("%s.%s", idx.Schema, idx.IndexName)
 			tblName := fmt.Sprintf("%s.%s", idx.Schema, idx.TableName)
@@ -314,13 +314,12 @@ func PrintIndexBloatSummary(indexes []analysis.BloatIndex) {
 			if len(tblName) > 30 {
 				tblName = tblName[:27] + "..."
 			}
-			fmt.Printf("  %-30s %-30s %10s %10s %10s %4d\n",
+			fmt.Printf("  %-30s %-30s %10s %10s %10s\n",
 				idxName,
 				tblName,
 				FormatSize(idx.IndexSize),
 				"N/A",
 				"-",
-				idx.FillFactor,
 			)
 		}
 		fmt.Println()
@@ -331,8 +330,8 @@ func PrintIndexBloatSummary(indexes []analysis.BloatIndex) {
 
 // printIndexBloatTable prints a table of index bloat entries with totals
 func printIndexBloatTable(entries []analysis.BloatIndex) {
-	fmt.Printf("  %-30s %-30s %10s %10s %10s %4s\n", "Index", "Table", "Size", "Bloat", "Bloat %", "FF")
-	fmt.Println("  " + repeatString("-", 100))
+	fmt.Printf("  %-30s %-30s %10s %10s %10s\n", "Index", "Table", "Size", "Bloat", "Bloat %")
+	fmt.Println("  " + repeatString("-", 96))
 
 	var totalBloat int64
 	for _, idx := range entries {
@@ -344,13 +343,12 @@ func printIndexBloatTable(entries []analysis.BloatIndex) {
 		if len(tblName) > 30 {
 			tblName = tblName[:27] + "..."
 		}
-		fmt.Printf("  %-30s %-30s %10s %10s %9.1f%% %4d\n",
+		fmt.Printf("  %-30s %-30s %10s %10s %9.1f%%\n",
 			idxName,
 			tblName,
 			FormatSize(idx.IndexSize),
 			FormatSize(idx.BloatSize),
 			idx.BloatRatio,
-			idx.FillFactor,
 		)
 		totalBloat += idx.BloatSize
 	}
