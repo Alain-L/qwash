@@ -220,3 +220,202 @@ func PrintDetailedBloat(tables []analysis.BloatTable) {
 		}
 	}
 }
+
+// PrintToastBloatSummary displays TOAST bloat information with severity grouping
+// Note: Bloat estimation is only reliable for TOAST >= 10 MB
+func PrintToastBloatSummary(toastBloat []analysis.ToastBloat) {
+	if len(toastBloat) == 0 {
+		return
+	}
+
+	// Calculate summary statistics
+	var totalToastSize, totalToastBloat int64
+	var tablesWithBloat int
+	for _, tb := range toastBloat {
+		totalToastSize += tb.ToastSize
+		if tb.BloatPct != nil {
+			totalToastBloat += tb.BloatSize
+			if *tb.BloatPct >= 10.0 {
+				tablesWithBloat++
+			}
+		}
+	}
+
+	totalBloatPercent := 0.0
+	if totalToastSize > 0 {
+		totalBloatPercent = float64(totalToastBloat) * 100.0 / float64(totalToastSize)
+	}
+
+	// Print summary header
+	fmt.Printf("qwash – %d tables with TOAST analyzed\n\n", len(toastBloat))
+	fmt.Println(bold("TOAST BLOAT SUMMARY"))
+	fmt.Println()
+	fmt.Printf("  Tables analyzed           : %d\n", len(toastBloat))
+	fmt.Printf("  Tables with bloat         : %d (%.1f%%)\n", tablesWithBloat, float64(tablesWithBloat)*100.0/float64(len(toastBloat)))
+	fmt.Println()
+	fmt.Printf("  Total TOAST size          : %s\n", FormatSize(totalToastSize))
+	fmt.Printf("  Total bloat detected      : %s (%.1f%%)\n", FormatSize(totalToastBloat), totalBloatPercent)
+	fmt.Printf("  Reclaimable space         : %s\n", FormatSize(totalToastBloat))
+	fmt.Println()
+
+	// Group tables by bloat severity (only tables with reliable estimates)
+	var critical, high, medium, unreliable []analysis.ToastBloat
+	for _, tb := range toastBloat {
+		if tb.BloatPct == nil {
+			unreliable = append(unreliable, tb)
+		} else if *tb.BloatPct >= 50.0 {
+			critical = append(critical, tb)
+		} else if *tb.BloatPct >= 30.0 {
+			high = append(high, tb)
+		} else if *tb.BloatPct >= 10.0 {
+			medium = append(medium, tb)
+		}
+	}
+
+	// Sort each group by bloat percentage (descending)
+	sort.Slice(critical, func(i, j int) bool { return *critical[i].BloatPct > *critical[j].BloatPct })
+	sort.Slice(high, func(i, j int) bool { return *high[i].BloatPct > *high[j].BloatPct })
+	sort.Slice(medium, func(i, j int) bool { return *medium[i].BloatPct > *medium[j].BloatPct })
+
+	// Print CRITICAL bloat section
+	hasStaleStats := false
+	if len(critical) > 0 {
+		fmt.Println(bold("CRITICAL BLOAT") + " (≥ 50%)")
+		fmt.Println()
+		if printToastBloatTable(critical) {
+			hasStaleStats = true
+		}
+	}
+
+	// Print HIGH bloat section
+	if len(high) > 0 {
+		fmt.Println(bold("HIGH BLOAT") + " (30-50%)")
+		fmt.Println()
+		if printToastBloatTable(high) {
+			hasStaleStats = true
+		}
+	}
+
+	// Print MEDIUM bloat section
+	if len(medium) > 0 {
+		fmt.Println(bold("MEDIUM BLOAT") + " (10-30%)")
+		fmt.Println()
+		if printToastBloatTable(medium) {
+			hasStaleStats = true
+		}
+	}
+
+	// No bloat message
+	if len(critical) == 0 && len(high) == 0 && len(medium) == 0 {
+		fmt.Println(bold("NO SIGNIFICANT BLOAT DETECTED"))
+		fmt.Println()
+		fmt.Println("  All tables have TOAST bloat < 10%")
+		fmt.Println()
+	}
+
+	// Stale stats footnote
+	if hasStaleStats {
+		fmt.Println("  * No VACUUM in the last 24 hours — pg_class stats may be stale.")
+		fmt.Println("    Run VACUUM on these tables for accurate TOAST bloat estimation.")
+		fmt.Println()
+	}
+
+	// Print unreliable estimates at the end (but not empty TOAST tables)
+	var unreliableNonEmpty []analysis.ToastBloat
+	for _, tb := range unreliable {
+		if tb.ToastSize > 0 {
+			unreliableNonEmpty = append(unreliableNonEmpty, tb)
+		}
+	}
+	if len(unreliableNonEmpty) > 0 {
+		fmt.Println(bold("UNRELIABLE ESTIMATES") + " (< 10 MB)")
+		fmt.Println()
+		fmt.Printf("  %-40s %12s %12s %10s\n", "Table", "TOAST Size", "Bloat", "Bloat %")
+		fmt.Println("  " + repeatString("-", 81))
+		for _, tb := range unreliableNonEmpty {
+			tableName := fmt.Sprintf("%s.%s", tb.Schema, tb.TableName)
+			if len(tableName) > 40 {
+				tableName = tableName[:37] + "..."
+			}
+			fmt.Printf("  %-40s %12s %12s %10s\n",
+				tableName,
+				FormatSize(tb.ToastSize),
+				"N/A",
+				"-",
+			)
+		}
+		fmt.Println()
+	}
+}
+
+// printToastBloatTable prints a table of TOAST bloat entries with totals.
+// Returns true if any entry has stale stats.
+func printToastBloatTable(entries []analysis.ToastBloat) bool {
+	fmt.Printf("  %-40s %12s %12s %10s\n", "Table", "TOAST Size", "Bloat", "Bloat %")
+	fmt.Println("  " + repeatString("-", 81))
+
+	var totalBloat int64
+	hasStale := false
+	for _, tb := range entries {
+		tableName := fmt.Sprintf("%s.%s", tb.Schema, tb.TableName)
+		if len(tableName) > 40 {
+			tableName = tableName[:37] + "..."
+		}
+		staleMarker := ""
+		if tb.StaleStats {
+			staleMarker = " *"
+			hasStale = true
+		}
+		fmt.Printf("  %-40s %12s %12s %9.2f%%%s\n",
+			tableName,
+			FormatSize(tb.ToastSize),
+			FormatSize(tb.BloatSize),
+			*tb.BloatPct,
+			staleMarker,
+		)
+		totalBloat += tb.BloatSize
+	}
+	fmt.Println()
+	fmt.Printf("  Total: %d tables | %s bloat reclaimable\n", len(entries), FormatSize(totalBloat))
+	fmt.Println()
+	return hasStale
+}
+
+// PrintDetailedToastBloat displays detailed TOAST bloat information for specific tables
+// Used when -t is combined with --estimate --toast
+func PrintDetailedToastBloat(toastData []analysis.ToastBloat) {
+	fmt.Println()
+	fmt.Println(bold("TOAST BLOAT ESTIMATION"))
+	fmt.Println()
+
+	for i, tb := range toastData {
+		tableName := fmt.Sprintf("%s.%s", tb.Schema, tb.TableName)
+		fmt.Println(tableName)
+		fmt.Println()
+		fmt.Printf("  TOAST Size  : %s\n", FormatSize(tb.ToastSize))
+
+		if tb.BloatPct != nil {
+			fmt.Printf("  Bloat       : %s\n", FormatSize(tb.BloatSize))
+			fmt.Printf("  Bloat %%     : %.2f%%\n", *tb.BloatPct)
+		} else if tb.Warning == "no chunks" {
+			fmt.Printf("  Bloat       : N/A (no chunks)\n")
+			fmt.Printf("  Bloat %%     : -\n")
+		} else {
+			fmt.Printf("  Bloat       : N/A\n")
+			fmt.Printf("  Bloat %%     : -\n")
+		}
+
+		fmt.Printf("  Pages       : %d\n", tb.ToastPages)
+		fmt.Printf("  Chunks      : %d\n", tb.ToastChunks)
+		if tb.StaleStats {
+			fmt.Printf("  Warning     : no VACUUM in the last 24h, stats may be stale\n")
+		}
+		fmt.Println()
+
+		// Separator between tables (except for the last one)
+		if i < len(toastData)-1 {
+			fmt.Println("  ---")
+			fmt.Println()
+		}
+	}
+}

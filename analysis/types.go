@@ -37,3 +37,17 @@ type BloatTable struct {
 	DeadTuples int64 `json:"dead_tuples"`
 	FillFactor int   `json:"fill_factor"`
 }
+
+// ToastBloat represents bloat information for a TOAST table.
+// Note: Bloat estimation is only reliable for TOAST tables >= 10 MB.
+type ToastBloat struct {
+	Schema      string   `json:"schema"`
+	TableName   string   `json:"table_name"`
+	ToastSize   int64    `json:"toast_size"`
+	ToastPages  int      `json:"toast_pages"`
+	ToastChunks int64    `json:"toast_chunks"`
+	BloatPct    *float64 `json:"bloat_pct,omitempty"`  // nil if < 10 MB or no ppc_ref
+	BloatSize   int64    `json:"bloat_size,omitempty"` // 0 if unreliable
+	Warning     string   `json:"warning,omitempty"`    // "< 10 MB" or "no chunks"
+	StaleStats  bool     `json:"stale_stats,omitempty"` // true if no VACUUM in last 24h
+}

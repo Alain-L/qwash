@@ -53,6 +53,10 @@ nfpms:
         dst: /usr/share/doc/qwash/README.md
       - src: CHANGELOG.md
         dst: /usr/share/doc/qwash/CHANGELOG.md
+      - src: sql/table_bloat.sql
+        dst: /usr/share/doc/qwash/sql/table_bloat.sql
+      - src: sql/toast_bloat.sql
+        dst: /usr/share/doc/qwash/sql/toast_bloat.sql
 
 checksum:
   name_template: 'checksums.txt'

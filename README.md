@@ -9,7 +9,7 @@ qwash is a **standalone tool** that combines bloat estimation and reduction in a
 
 ## Features
 
-- **Bloat Estimation** — Analyze tables using PostgreSQL system catalogs (no `pgstattuple`)
+- **Bloat Estimation** — Analyze table and TOAST bloat using PostgreSQL system catalogs (no `pgstattuple`)
 - **Non-blocking Reduction** — Reclaim space incrementally without exclusive locks
 - **Trigger & FK Safe** — uses `session_replication_role = replica` (own session only)
 - **Multiple Modes** — Default (2 workers), fast (4 workers), or slow (1 worker with delay)
@@ -24,7 +24,7 @@ qwash is a **standalone tool** that combines bloat estimation and reduction in a
 Download the latest release from [GitHub Releases](https://github.com/Alain-L/qwash/releases):
 
 ```sh
-VERSION=0.2.0  # Check latest version on GitHub
+VERSION=0.3.0  # Check latest version on GitHub
 
 # Linux (amd64)
 curl -LO https://github.com/Alain-L/qwash/releases/download/v${VERSION}/qwash_${VERSION}_linux_amd64.tar.gz
@@ -40,17 +40,17 @@ sudo mv qwash /usr/local/bin/
 ### Debian/Ubuntu
 
 ```sh
-VERSION=0.2.0
-curl -LO https://github.com/Alain-L/qwash/releases/download/v${VERSION}/qwash_${VERSION}_amd64.deb
-sudo dpkg -i qwash_${VERSION}_amd64.deb
+VERSION=0.3.0
+curl -LO https://github.com/Alain-L/qwash/releases/download/v${VERSION}/qwash_${VERSION}_linux_amd64.deb
+sudo dpkg -i qwash_${VERSION}_linux_amd64.deb
 ```
 
 ### RHEL/Rocky/Fedora
 
 ```sh
-VERSION=0.2.0
-curl -LO https://github.com/Alain-L/qwash/releases/download/v${VERSION}/qwash_${VERSION}_amd64.rpm
-sudo rpm -i qwash_${VERSION}_amd64.rpm
+VERSION=0.3.0
+curl -LO https://github.com/Alain-L/qwash/releases/download/v${VERSION}/qwash_${VERSION}_linux_amd64.rpm
+sudo rpm -i qwash_${VERSION}_linux_amd64.rpm
 ```
 
 ### From source
@@ -70,8 +70,14 @@ go build -o bin/qwash
 ### Estimate Bloat
 
 ```sh
-# Analyze all tables in a database
+# Analyze all tables in a database (heap bloat)
 ./bin/qwash --estimate -d mydb -U postgres -H localhost
+
+# Analyze TOAST bloat
+./bin/qwash --estimate --toast -d mydb
+
+# Analyze both heap and TOAST bloat
+./bin/qwash --estimate --heap --toast -d mydb
 
 # Analyze specific tables
 ./bin/qwash --estimate -d mydb -t mytable -t othertable
@@ -121,6 +127,8 @@ Connection:
 
 Analysis:
   -E, --estimate          Display bloat estimation report
+      --heap              Analyze heap (table) bloat (default if neither --heap nor --toast)
+      --toast             Analyze TOAST bloat
   -D, --detail            Show detailed analysis per table and index
   -t, --table strings     Target specific table(s)
   -n, --schema strings    Target specific schema(s)
@@ -170,6 +178,8 @@ qwash uses the [ioguix bloat estimation approach](https://github.com/ioguix/pgsq
 
 The difference is the estimated bloat.
 
+**TOAST bloat** (`--toast`) uses a similar approach: it compares actual TOAST pages with the theoretical minimum based on live chunk count and average chunk size derived from `pg_column_size()` (no detoasting). Estimation is reliable for TOAST tables >= 10 MB and requires recent `VACUUM` for accurate stats. A [standalone query](sql/toast_bloat.sql) is available for DBA use without installing qwash.
+
 ### Bloat Reduction Algorithm
 
 The debloat algorithm is inspired by [pgcompacttable](https://github.com/dataegret/pgcompacttable) but uses an **UPDATE-based compaction** approach via a temporary stored procedure:
@@ -199,26 +209,75 @@ This approach:
 ### Text Output (--estimate)
 
 ```
-qwash – 3 tables analyzed
+qwash – 5 tables analyzed
 
 SUMMARY
 
-  Tables analyzed           : 3
-  Tables with bloat         : 2 (66.7%)
+  Tables analyzed           : 5
+  Tables with bloat         : 5 (100.0%)
 
-  Total database size       : 1.9 GB
-  Total bloat detected      : 1.1 GB (57.9%)
-  Reclaimable space         : 1.1 GB
+  Total database size       : 23.4 MB
+  Total bloat detected      : 12.3 MB (52.4%)
+  Reclaimable space         : 12.3 MB
 
 CRITICAL BLOAT (≥ 50%)
 
   Table                                            Size        Bloat    Bloat %
   ---------------------------------------------------------------------------------
-  public.orders                                   1.2 GB     892.0 MB     74.33%
-  public.order_items                            567.0 MB     234.0 MB     41.27%
+  public.orders                                 12.0 MB       8.8 MB     71.95%
+  public.audit_log                             296.0 KB     176.0 KB     59.46%
+  public.notifications                          16.0 KB       8.0 KB     50.00%
 
-  Total: 2 tables | 1.1 GB bloat reclaimable
+  Total: 3 tables | 9.0 MB bloat reclaimable
+
+HIGH BLOAT (30-50%)
+
+  Table                                            Size        Bloat    Bloat %
+  ---------------------------------------------------------------------------------
+  public.sessions                                8.1 MB       2.8 MB     35.11%
+
+  Total: 1 tables | 2.8 MB bloat reclaimable
+
+MEDIUM BLOAT (10-30%)
+
+  Table                                            Size        Bloat    Bloat %
+  ---------------------------------------------------------------------------------
+  public.products                                3.1 MB     440.0 KB     13.99%
+
+  Total: 1 tables | 440.0 KB bloat reclaimable
 ```
+
+### Text Output (--estimate --toast)
+
+```
+qwash – 3 tables with TOAST analyzed
+
+TOAST BLOAT SUMMARY
+
+  Tables analyzed           : 3
+  Tables with bloat         : 2 (66.7%)
+
+  Total TOAST size          : 130.2 MB
+  Total bloat detected      : 69.3 MB (53.2%)
+  Reclaimable space         : 69.3 MB
+
+CRITICAL BLOAT (≥ 50%)
+
+  Table                                      TOAST Size        Bloat    Bloat %
+  ---------------------------------------------------------------------------------
+  public.audit_log                              52.1 MB      36.3 MB     69.60%
+  public.toast_large                            62.5 MB      33.1 MB     53.00%
+
+  Total: 2 tables | 69.3 MB bloat reclaimable
+
+UNRELIABLE ESTIMATES (< 10 MB)
+
+  Table                                      TOAST Size        Bloat    Bloat %
+  ---------------------------------------------------------------------------------
+  public.notifications                           2.6 MB          N/A          -
+```
+
+TOAST bloat estimation requires recent `VACUUM` (not just `ANALYZE`) for accurate `pg_class` stats. Tables with TOAST data smaller than 10 MB are flagged as unreliable.
 
 ### Text Output (--estimate -t table)
 
@@ -227,13 +286,13 @@ BLOAT ESTIMATION
 
 public.orders
 
-  Size        : 1.2 GB
-  Bloat       : 892.0 MB
-  Bloat %     : 74.33%
-  Pages       : 157286
-  Min pages   : 40384
-  Live tuples : 1250000
-  Dead tuples : 3750000
+  Size        : 12.0 MB
+  Bloat       : 8.8 MB
+  Bloat %     : 71.95%
+  Pages       : 1572
+  Min pages   : 441
+  Live tuples : 60000
+  Dead tuples : 0
   Fill factor : 100
 ```
 
@@ -245,17 +304,34 @@ public.orders
     {
       "schema": "public",
       "table_name": "orders",
-      "table_size": 1288490188,
-      "bloat_size": 935329792,
-      "bloat_ratio": 74.3,
-      "pages": 157286,
-      "min_pages": 40384,
-      "live_tuples": 1250000,
-      "dead_tuples": 3750000,
+      "table_size": 12582912,
+      "bloat_size": 9265152,
+      "bloat_ratio": 71.95,
+      "pages": 1572,
+      "min_pages": 441,
+      "live_tuples": 60000,
+      "dead_tuples": 0,
       "fill_factor": 100
     }
-  ],
-  "indexes": null
+  ]
+}
+```
+
+### JSON Output (--estimate --toast --json)
+
+```json
+{
+  "toast": [
+    {
+      "schema": "public",
+      "table_name": "audit_log",
+      "toast_size": 54616064,
+      "toast_pages": 6667,
+      "toast_chunks": 12000,
+      "bloat_pct": 69.6,
+      "bloat_size": 38020064
+    }
+  ]
 }
 ```
 
