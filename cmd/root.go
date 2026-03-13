@@ -49,6 +49,7 @@ var (
 	// Target selection (what to analyze/debloat)
 	heapFlag  bool // --heap (default if neither specified)
 	toastFlag bool // --toast
+	btreeFlag bool // --btree
 
 	// Debloat options
 	debloatFlag bool   // --debloat (-B)
@@ -125,6 +126,8 @@ func init() {
 		"Analyze heap bloat (default if neither --heap nor --toast specified)")
 	rootCmd.PersistentFlags().BoolVar(&toastFlag, "toast", false,
 		"Analyze TOAST bloat")
+	rootCmd.PersistentFlags().BoolVar(&btreeFlag, "btree", false,
+		"Analyze B-Tree index bloat")
 
 	// Debloat options
 	rootCmd.PersistentFlags().BoolVarP(&debloatFlag, "debloat", "B", false,
@@ -218,8 +221,8 @@ func executeAnalysis(cmd *cobra.Command, args []string) {
 		estimateFlag = true
 	}
 
-	// Default to --heap if neither --heap nor --toast specified
-	if !heapFlag && !toastFlag {
+	// Default to --heap if no target specified
+	if !heapFlag && !toastFlag && !btreeFlag {
 		heapFlag = true
 	}
 
@@ -301,6 +304,9 @@ func runEstimate(connection *db.DB) {
 		if toastFlag {
 			fmt.Println("  TOAST bloat estimation")
 		}
+		if btreeFlag {
+			fmt.Println("  B-Tree index bloat estimation")
+		}
 	}
 
 	// Analyze table (heap) bloat if --heap is enabled
@@ -323,6 +329,16 @@ func runEstimate(connection *db.DB) {
 		}
 	}
 
+	// Analyze B-Tree index bloat if --btree is enabled
+	var indexBloat []analysis.BloatIndex
+	if btreeFlag {
+		indexBloat, err = analysis.DetectBtreeIndexBloat(context.Background(), connection)
+		if err != nil {
+			log.Printf("[WARNING] Failed to analyze B-Tree index bloat: %v", err)
+			// Continue without index data
+		}
+	}
+
 	// Filter by specific tables if -t is provided
 	if len(targetTables) > 0 {
 		// Detailed view for specific tables
@@ -335,7 +351,11 @@ func runEstimate(connection *db.DB) {
 			if toastFlag {
 				filteredToast = filterToastByName(toastBloat, targetTables)
 			}
-			output.PrintBloatJSON(filtered, nil, filteredToast)
+			var filteredIndex []analysis.BloatIndex
+			if btreeFlag {
+				filteredIndex = filterIndexByTable(indexBloat, targetTables)
+			}
+			output.PrintBloatJSON(filtered, filteredIndex, filteredToast)
 		} else {
 			// Print heap bloat if enabled
 			if heapFlag {
@@ -353,17 +373,28 @@ func runEstimate(connection *db.DB) {
 					output.PrintDetailedToastBloat(filteredToast)
 				}
 			}
+			// Print B-Tree index bloat if enabled
+			if btreeFlag {
+				filteredIndex := filterIndexByTable(indexBloat, targetTables)
+				if len(filteredIndex) > 0 {
+					output.PrintDetailedIndexBloat(filteredIndex)
+				}
+			}
 		}
 		return
 	}
 
 	// Display results based on output format
 	if jsonFlag {
-		output.PrintBloatJSON(tableBloat, nil, toastBloat)
+		output.PrintBloatJSON(tableBloat, indexBloat, toastBloat)
 	} else {
 		// Print heap bloat if enabled
 		if heapFlag && len(tableBloat) > 0 {
 			output.PrintBloatSummary(tableBloat, nil)
+		}
+		// Print B-Tree index bloat if enabled
+		if btreeFlag && len(indexBloat) > 0 {
+			output.PrintIndexBloatSummary(indexBloat)
 		}
 		// Print TOAST bloat if enabled
 		if toastFlag && len(toastBloat) > 0 {
@@ -397,6 +428,21 @@ func filterToastByName(toastData []analysis.ToastBloat, targetNames []string) []
 			// Match full name (schema.table) or just table name
 			if fullName == target || tb.TableName == target {
 				result = append(result, tb)
+				break
+			}
+		}
+	}
+	return result
+}
+
+// filterIndexByTable filters index bloat by parent table name (supports schema.table or just table)
+func filterIndexByTable(indexes []analysis.BloatIndex, targetNames []string) []analysis.BloatIndex {
+	var result []analysis.BloatIndex
+	for _, idx := range indexes {
+		fullName := fmt.Sprintf("%s.%s", idx.Schema, idx.TableName)
+		for _, target := range targetNames {
+			if fullName == target || idx.TableName == target {
+				result = append(result, idx)
 				break
 			}
 		}
