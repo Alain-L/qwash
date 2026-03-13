@@ -24,7 +24,7 @@ qwash is a **standalone tool** that combines bloat estimation and reduction in a
 Download the latest release from [GitHub Releases](https://github.com/Alain-L/qwash/releases):
 
 ```sh
-VERSION=0.2.0  # Check latest version on GitHub
+VERSION=0.3.0  # Check latest version on GitHub
 
 # Linux (amd64)
 curl -LO https://github.com/Alain-L/qwash/releases/download/v${VERSION}/qwash_${VERSION}_linux_amd64.tar.gz
@@ -40,17 +40,17 @@ sudo mv qwash /usr/local/bin/
 ### Debian/Ubuntu
 
 ```sh
-VERSION=0.2.0
-curl -LO https://github.com/Alain-L/qwash/releases/download/v${VERSION}/qwash_${VERSION}_amd64.deb
-sudo dpkg -i qwash_${VERSION}_amd64.deb
+VERSION=0.3.0
+curl -LO https://github.com/Alain-L/qwash/releases/download/v${VERSION}/qwash_${VERSION}_linux_amd64.deb
+sudo dpkg -i qwash_${VERSION}_linux_amd64.deb
 ```
 
 ### RHEL/Rocky/Fedora
 
 ```sh
-VERSION=0.2.0
-curl -LO https://github.com/Alain-L/qwash/releases/download/v${VERSION}/qwash_${VERSION}_amd64.rpm
-sudo rpm -i qwash_${VERSION}_amd64.rpm
+VERSION=0.3.0
+curl -LO https://github.com/Alain-L/qwash/releases/download/v${VERSION}/qwash_${VERSION}_linux_amd64.rpm
+sudo rpm -i qwash_${VERSION}_linux_amd64.rpm
 ```
 
 ### From source
@@ -250,30 +250,31 @@ MEDIUM BLOAT (10-30%)
 ### Text Output (--estimate --toast)
 
 ```
-qwash – 2 tables with TOAST analyzed
+qwash – 3 tables with TOAST analyzed
 
 TOAST BLOAT SUMMARY
 
-  Tables analyzed           : 2
-  Tables with bloat         : 1 (50.0%)
+  Tables analyzed           : 3
+  Tables with bloat         : 2 (66.7%)
 
-  Total TOAST size          : 39.8 MB
-  Total bloat detected      : 23.5 MB (58.9%)
-  Reclaimable space         : 23.5 MB
+  Total TOAST size          : 130.2 MB
+  Total bloat detected      : 69.3 MB (53.2%)
+  Reclaimable space         : 69.3 MB
 
 CRITICAL BLOAT (≥ 50%)
 
   Table                                      TOAST Size        Bloat    Bloat %
   ---------------------------------------------------------------------------------
-  public.audit_log                              39.1 MB      23.5 MB     60.00%
+  public.audit_log                              52.1 MB      36.3 MB     69.60%
+  public.toast_large                            62.5 MB      33.1 MB     53.00%
 
-  Total: 1 tables | 23.5 MB bloat reclaimable
+  Total: 2 tables | 69.3 MB bloat reclaimable
 
 UNRELIABLE ESTIMATES (< 10 MB)
 
   Table                                      TOAST Size        Bloat    Bloat %
   ---------------------------------------------------------------------------------
-  public.notifications                         800.0 KB          N/A          -
+  public.notifications                           2.6 MB          N/A          -
 ```
 
 TOAST bloat estimation requires recent `VACUUM` (not just `ANALYZE`) for accurate `pg_class` stats. Tables with TOAST data smaller than 10 MB are flagged as unreliable.
@@ -324,11 +325,11 @@ public.orders
     {
       "schema": "public",
       "table_name": "audit_log",
-      "toast_size": 40960000,
-      "toast_pages": 5000,
-      "toast_chunks": 8000,
-      "bloat_pct": 60,
-      "bloat_size": 24592000
+      "toast_size": 54616064,
+      "toast_pages": 6667,
+      "toast_chunks": 12000,
+      "bloat_pct": 69.6,
+      "bloat_size": 38020064
     }
   ]
 }
