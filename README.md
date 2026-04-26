@@ -24,7 +24,7 @@ qwash is a **standalone tool** that combines bloat estimation and reduction in a
 Download the latest release from [GitHub Releases](https://github.com/Alain-L/qwash/releases):
 
 ```sh
-VERSION=0.3.0  # Check latest version on GitHub
+VERSION=0.4.0  # Check latest version on GitHub
 
 # Linux (amd64)
 curl -LO https://github.com/Alain-L/qwash/releases/download/v${VERSION}/qwash_${VERSION}_linux_amd64.tar.gz
@@ -40,7 +40,7 @@ sudo mv qwash /usr/local/bin/
 ### Debian/Ubuntu
 
 ```sh
-VERSION=0.3.0
+VERSION=0.4.0
 curl -LO https://github.com/Alain-L/qwash/releases/download/v${VERSION}/qwash_${VERSION}_linux_amd64.deb
 sudo dpkg -i qwash_${VERSION}_linux_amd64.deb
 ```
@@ -48,7 +48,7 @@ sudo dpkg -i qwash_${VERSION}_linux_amd64.deb
 ### RHEL/Rocky/Fedora
 
 ```sh
-VERSION=0.3.0
+VERSION=0.4.0
 curl -LO https://github.com/Alain-L/qwash/releases/download/v${VERSION}/qwash_${VERSION}_linux_amd64.rpm
 sudo rpm -i qwash_${VERSION}_linux_amd64.rpm
 ```

@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-04-26
+
+### Added
+- **B-Tree index bloat estimation** (`--btree`): Analyze B-Tree index bloat using `pg_stats` (`avg_width`, `null_frac`) and B-Tree page overhead, without requiring `pgstattuple`
+  - Precision within ~5 pts of `pgstatindex` on bloated indexes (validated on PostgreSQL 18)
+  - Severity grouping (CRITICAL ≥ 50%, HIGH 30-50%, MEDIUM 10-30%) consistent with `--heap` and `--toast`
+  - Detailed per-index view with `-D` (pages, min pages, bloat pages, fillfactor)
+  - JSON output via `--btree --json` (top-level `indexes` key)
+  - Indexes with `name`-typed key columns flagged as unreliable (`is_na = true`)
+- **Standalone B-Tree query** (`sql/btree_bloat.sql`): DBA-ready query with `pg_size_pretty` formatting, runnable without installing qwash
+- **B-Tree integration tests**: 7 test cases (basic, high bloat, no bloat, IsNA, fillfactor, CLI, JSON)
+
 ## [0.3.0] - 2026-03-11
 
 ### Added
