@@ -221,6 +221,177 @@ func PrintDetailedBloat(tables []analysis.BloatTable) {
 	}
 }
 
+// PrintIndexBloatSummary displays B-Tree index bloat with severity grouping
+func PrintIndexBloatSummary(indexes []analysis.BloatIndex) {
+	if len(indexes) == 0 {
+		return
+	}
+
+	// Calculate summary statistics
+	var totalIndexSize, totalBloatSize int64
+	var indexesWithBloat int
+	for _, idx := range indexes {
+		totalIndexSize += idx.IndexSize
+		totalBloatSize += idx.BloatSize
+		if idx.BloatRatio >= 10.0 {
+			indexesWithBloat++
+		}
+	}
+
+	totalBloatPercent := 0.0
+	if totalIndexSize > 0 {
+		totalBloatPercent = float64(totalBloatSize) * 100.0 / float64(totalIndexSize)
+	}
+
+	// Print summary header
+	fmt.Printf("qwash – %d B-Tree indexes analyzed\n\n", len(indexes))
+	fmt.Println(bold("INDEX BLOAT SUMMARY"))
+	fmt.Println()
+	fmt.Printf("  Indexes analyzed          : %d\n", len(indexes))
+	fmt.Printf("  Indexes with bloat        : %d (%.1f%%)\n", indexesWithBloat, float64(indexesWithBloat)*100.0/float64(len(indexes)))
+	fmt.Println()
+	fmt.Printf("  Total index size          : %s\n", FormatSize(totalIndexSize))
+	fmt.Printf("  Total bloat detected      : %s (%.1f%%)\n", FormatSize(totalBloatSize), totalBloatPercent)
+	fmt.Printf("  Reclaimable space         : %s\n", FormatSize(totalBloatSize))
+	fmt.Println()
+
+	// Group indexes by bloat severity
+	var critical, high, medium, unreliable []analysis.BloatIndex
+	for _, idx := range indexes {
+		if idx.IsNA {
+			unreliable = append(unreliable, idx)
+		} else if idx.BloatRatio >= 50.0 {
+			critical = append(critical, idx)
+		} else if idx.BloatRatio >= 30.0 {
+			high = append(high, idx)
+		} else if idx.BloatRatio >= 10.0 {
+			medium = append(medium, idx)
+		}
+	}
+
+	// Sort each group by bloat percentage (descending)
+	sort.Slice(critical, func(i, j int) bool { return critical[i].BloatRatio > critical[j].BloatRatio })
+	sort.Slice(high, func(i, j int) bool { return high[i].BloatRatio > high[j].BloatRatio })
+	sort.Slice(medium, func(i, j int) bool { return medium[i].BloatRatio > medium[j].BloatRatio })
+
+	if len(critical) > 0 {
+		fmt.Println(bold("CRITICAL BLOAT") + " (≥ 50%)")
+		fmt.Println()
+		printIndexBloatTable(critical)
+	}
+
+	if len(high) > 0 {
+		fmt.Println(bold("HIGH BLOAT") + " (30-50%)")
+		fmt.Println()
+		printIndexBloatTable(high)
+	}
+
+	if len(medium) > 0 {
+		fmt.Println(bold("MEDIUM BLOAT") + " (10-30%)")
+		fmt.Println()
+		printIndexBloatTable(medium)
+	}
+
+	if len(critical) == 0 && len(high) == 0 && len(medium) == 0 && len(unreliable) == 0 {
+		fmt.Println(bold("NO SIGNIFICANT BLOAT DETECTED"))
+		fmt.Println()
+		fmt.Println("  All indexes have bloat < 10%")
+		fmt.Println()
+	}
+
+	// Print unreliable estimates (is_na = true)
+	if len(unreliable) > 0 {
+		fmt.Println(bold("UNRELIABLE ESTIMATES") + " (is_na = true)")
+		fmt.Println()
+		fmt.Printf("  %-30s %-30s %10s %10s %10s\n", "Index", "Table", "Size", "Bloat", "Bloat %")
+		fmt.Println("  " + repeatString("-", 96))
+		for _, idx := range unreliable {
+			idxName := fmt.Sprintf("%s.%s", idx.Schema, idx.IndexName)
+			tblName := fmt.Sprintf("%s.%s", idx.Schema, idx.TableName)
+			if len(idxName) > 30 {
+				idxName = idxName[:27] + "..."
+			}
+			if len(tblName) > 30 {
+				tblName = tblName[:27] + "..."
+			}
+			fmt.Printf("  %-30s %-30s %10s %10s %10s\n",
+				idxName,
+				tblName,
+				FormatSize(idx.IndexSize),
+				"N/A",
+				"-",
+			)
+		}
+		fmt.Println()
+		fmt.Println("  Columns of type \"name\" produce unreliable pg_stats estimates.")
+		fmt.Println()
+	}
+}
+
+// printIndexBloatTable prints a table of index bloat entries with totals
+func printIndexBloatTable(entries []analysis.BloatIndex) {
+	fmt.Printf("  %-30s %-30s %10s %10s %10s\n", "Index", "Table", "Size", "Bloat", "Bloat %")
+	fmt.Println("  " + repeatString("-", 96))
+
+	var totalBloat int64
+	for _, idx := range entries {
+		idxName := fmt.Sprintf("%s.%s", idx.Schema, idx.IndexName)
+		tblName := fmt.Sprintf("%s.%s", idx.Schema, idx.TableName)
+		if len(idxName) > 30 {
+			idxName = idxName[:27] + "..."
+		}
+		if len(tblName) > 30 {
+			tblName = tblName[:27] + "..."
+		}
+		fmt.Printf("  %-30s %-30s %10s %10s %9.1f%%\n",
+			idxName,
+			tblName,
+			FormatSize(idx.IndexSize),
+			FormatSize(idx.BloatSize),
+			idx.BloatRatio,
+		)
+		totalBloat += idx.BloatSize
+	}
+	fmt.Println()
+	fmt.Printf("  Total: %d indexes | %s bloat reclaimable\n", len(entries), FormatSize(totalBloat))
+	fmt.Println()
+}
+
+// PrintDetailedIndexBloat displays detailed B-Tree index bloat for specific indexes
+func PrintDetailedIndexBloat(indexes []analysis.BloatIndex) {
+	fmt.Println()
+	fmt.Println(bold("INDEX BLOAT ESTIMATION"))
+	fmt.Println()
+
+	for i, idx := range indexes {
+		idxName := fmt.Sprintf("%s.%s", idx.Schema, idx.IndexName)
+		tblName := fmt.Sprintf("%s.%s", idx.Schema, idx.TableName)
+		fmt.Println(idxName)
+		fmt.Println()
+		fmt.Printf("  Table       : %s\n", tblName)
+		fmt.Printf("  Size        : %s\n", FormatSize(idx.IndexSize))
+		fmt.Printf("  Bloat       : %s\n", FormatSize(idx.BloatSize))
+		if idx.BloatPct != nil {
+			fmt.Printf("  Bloat %%     : %.1f%%\n", *idx.BloatPct)
+		} else {
+			fmt.Printf("  Bloat %%     : -\n")
+		}
+		fmt.Printf("  Pages       : %d\n", idx.Pages)
+		fmt.Printf("  Min pages   : %d\n", idx.MinPages)
+		fmt.Printf("  Bloat pages : %d\n", idx.BloatPages)
+		fmt.Printf("  Fill factor : %d\n", idx.FillFactor)
+		if idx.IsNA {
+			fmt.Printf("  Warning     : unreliable estimate (name column type)\n")
+		}
+		fmt.Println()
+
+		if i < len(indexes)-1 {
+			fmt.Println("  ---")
+			fmt.Println()
+		}
+	}
+}
+
 // PrintToastBloatSummary displays TOAST bloat information with severity grouping
 // Note: Bloat estimation is only reliable for TOAST >= 10 MB
 func PrintToastBloatSummary(toastBloat []analysis.ToastBloat) {

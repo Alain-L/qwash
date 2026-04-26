@@ -9,7 +9,7 @@ qwash is a **standalone tool** that combines bloat estimation and reduction in a
 
 ## Features
 
-- **Bloat Estimation** — Analyze table and TOAST bloat using PostgreSQL system catalogs (no `pgstattuple`)
+- **Bloat Estimation** — Analyze table, TOAST and B-Tree index bloat using PostgreSQL system catalogs (no `pgstattuple`)
 - **Non-blocking Reduction** — Reclaim space incrementally without exclusive locks
 - **Trigger & FK Safe** — uses `session_replication_role = replica` (own session only)
 - **Multiple Modes** — Default (2 workers), fast (4 workers), or slow (1 worker with delay)
@@ -24,7 +24,7 @@ qwash is a **standalone tool** that combines bloat estimation and reduction in a
 Download the latest release from [GitHub Releases](https://github.com/Alain-L/qwash/releases):
 
 ```sh
-VERSION=0.3.0  # Check latest version on GitHub
+VERSION=0.4.0  # Check latest version on GitHub
 
 # Linux (amd64)
 curl -LO https://github.com/Alain-L/qwash/releases/download/v${VERSION}/qwash_${VERSION}_linux_amd64.tar.gz
@@ -40,7 +40,7 @@ sudo mv qwash /usr/local/bin/
 ### Debian/Ubuntu
 
 ```sh
-VERSION=0.3.0
+VERSION=0.4.0
 curl -LO https://github.com/Alain-L/qwash/releases/download/v${VERSION}/qwash_${VERSION}_linux_amd64.deb
 sudo dpkg -i qwash_${VERSION}_linux_amd64.deb
 ```
@@ -48,7 +48,7 @@ sudo dpkg -i qwash_${VERSION}_linux_amd64.deb
 ### RHEL/Rocky/Fedora
 
 ```sh
-VERSION=0.3.0
+VERSION=0.4.0
 curl -LO https://github.com/Alain-L/qwash/releases/download/v${VERSION}/qwash_${VERSION}_linux_amd64.rpm
 sudo rpm -i qwash_${VERSION}_linux_amd64.rpm
 ```
@@ -78,6 +78,12 @@ go build -o bin/qwash
 
 # Analyze both heap and TOAST bloat
 ./bin/qwash --estimate --heap --toast -d mydb
+
+# Analyze B-Tree index bloat
+./bin/qwash --estimate --btree -d mydb
+
+# Analyze indexes of a specific table
+./bin/qwash --estimate --btree -d mydb -t mytable
 
 # Analyze specific tables
 ./bin/qwash --estimate -d mydb -t mytable -t othertable
@@ -127,8 +133,9 @@ Connection:
 
 Analysis:
   -E, --estimate          Display bloat estimation report
-      --heap              Analyze heap (table) bloat (default if neither --heap nor --toast)
+      --heap              Analyze heap (table) bloat (default if no target specified)
       --toast             Analyze TOAST bloat
+      --btree             Analyze B-Tree index bloat
   -D, --detail            Show detailed analysis per table and index
   -t, --table strings     Target specific table(s)
   -n, --schema strings    Target specific schema(s)
@@ -179,6 +186,8 @@ qwash uses the [ioguix bloat estimation approach](https://github.com/ioguix/pgsq
 The difference is the estimated bloat.
 
 **TOAST bloat** (`--toast`) uses a similar approach: it compares actual TOAST pages with the theoretical minimum based on live chunk count and average chunk size derived from `pg_column_size()` (no detoasting). Estimation is reliable for TOAST tables >= 10 MB and requires recent `VACUUM` for accurate stats. A [standalone query](sql/toast_bloat.sql) is available for DBA use without installing qwash.
+
+**B-Tree index bloat** (`--btree`) follows the same ioguix methodology adapted for indexes: it derives the theoretical minimum number of pages from `pg_stats` (`avg_width`, `null_frac`) and B-Tree page overhead (page header, opaque, item pointers, tuple header, MAXALIGN padding) and compares it to the actual `relpages` count. Indexes whose key columns include a `name`-typed column are flagged as **unreliable** (`is_na = true`) because `pg_stats` returns inaccurate widths for that type. A [standalone query](sql/btree_bloat.sql) is also available for DBA use.
 
 ### Bloat Reduction Algorithm
 
@@ -278,6 +287,85 @@ UNRELIABLE ESTIMATES (< 10 MB)
 ```
 
 TOAST bloat estimation requires recent `VACUUM` (not just `ANALYZE`) for accurate `pg_class` stats. Tables with TOAST data smaller than 10 MB are flagged as unreliable.
+
+### Text Output (--estimate --btree)
+
+```
+qwash – 12 B-Tree indexes analyzed
+
+INDEX BLOAT SUMMARY
+
+  Indexes analyzed          : 12
+  Indexes with bloat        : 7 (58.3%)
+
+  Total index size          : 84.0 MB
+  Total bloat detected      : 31.7 MB (37.7%)
+  Reclaimable space         : 31.7 MB
+
+CRITICAL BLOAT (≥ 50%)
+
+  Index                          Table                                Size      Bloat    Bloat %
+  ------------------------------------------------------------------------------------------------
+  public.orders_customer_idx     public.orders                     12.0 MB     7.2 MB     60.0%
+  public.audit_log_pkey          public.audit_log                   8.0 MB     4.4 MB     55.0%
+
+  Total: 2 indexes | 11.6 MB bloat reclaimable
+
+HIGH BLOAT (30-50%)
+
+  Index                          Table                                Size      Bloat    Bloat %
+  ------------------------------------------------------------------------------------------------
+  public.sessions_user_idx       public.sessions                    8.0 MB     3.2 MB     40.0%
+
+  Total: 1 indexes | 3.2 MB bloat reclaimable
+
+UNRELIABLE ESTIMATES (is_na = true)
+
+  Index                          Table                                Size      Bloat    Bloat %
+  ------------------------------------------------------------------------------------------------
+  pg_catalog.pg_class_relname    pg_catalog.pg_class              512.0 KB        N/A          -
+
+  Columns of type "name" produce unreliable pg_stats estimates.
+```
+
+### Text Output (--estimate --btree -t table)
+
+```
+INDEX BLOAT ESTIMATION
+
+public.orders_customer_idx
+
+  Table       : public.orders
+  Size        : 12.0 MB
+  Bloat       : 7.2 MB
+  Bloat %     : 60.0%
+  Pages       : 1572
+  Min pages   : 629
+  Bloat pages : 943
+  Fill factor : 90
+```
+
+### JSON Output (--estimate --btree --json)
+
+```json
+{
+  "indexes": [
+    {
+      "schema": "public",
+      "index_name": "orders_customer_idx",
+      "table_name": "orders",
+      "index_size": 12582912,
+      "pages": 1572,
+      "min_pages": 629,
+      "bloat_pages": 943,
+      "bloat_size": 7544832,
+      "bloat_ratio": 60.0,
+      "bloat_pct": 60.0,
+      "fill_factor": 90
+    }
+  ]
+}
+```
 
 ### Text Output (--estimate -t table)
 

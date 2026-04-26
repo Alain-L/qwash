@@ -13,14 +13,20 @@ type DebloatResult struct {
 	DryRun            bool   `json:"dry_run,omitempty"`
 }
 
-// BloatIndex represents bloat information for an index.
+// BloatIndex represents bloat information for a B-Tree index.
 type BloatIndex struct {
-	Schema     string  `json:"schema"`
-	IndexName  string  `json:"index_name"`
-	TableName  string  `json:"table_name"`
-	IndexSize  int64   `json:"index_size"`
-	BloatSize  int64   `json:"bloat_size"`
-	BloatRatio float64 `json:"bloat_ratio"`
+	Schema     string   `json:"schema"`
+	IndexName  string   `json:"index_name"`
+	TableName  string   `json:"table_name"`
+	IndexSize  int64    `json:"index_size"`
+	Pages      int      `json:"pages"`
+	MinPages   int64    `json:"min_pages"`
+	BloatPages int64    `json:"bloat_pages"`
+	BloatSize  int64    `json:"bloat_size"`
+	BloatRatio float64  `json:"bloat_ratio"`
+	BloatPct   *float64 `json:"bloat_pct,omitempty"`
+	FillFactor int      `json:"fill_factor"`
+	IsNA       bool     `json:"is_na,omitempty"`
 }
 
 // BloatTable represents bloat information for a table.
