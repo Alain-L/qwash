@@ -1,11 +1,11 @@
 -- B-Tree Index Bloat Estimation Query
 -- Estimates B-Tree index bloat without requiring pgstattuple extension
+-- Uses PostgreSQL system catalogs and statistics to calculate wasted space
 --
 -- Strategy: Compare theoretical minimum pages (based on tuple count, key width
---           from pg_stats, fillfactor, and B-Tree page overhead) with actual pages
+--           from pg_stats, and B-Tree page overhead) with actual pages used,
+--           accounting for fillfactor and alignment
 --
--- Based on: ioguix btree bloat estimation query
--- Precision: good for indexes with up-to-date statistics (ANALYZE)
 -- Warning: columns of type "name" produce unreliable pg_stats (is_na = true)
 --
 -- Compatible with PostgreSQL 9.6+
@@ -128,7 +128,7 @@ tuple_size_calculation AS (
     page_header,
     page_opaque,
     item_pointer,
-    -- Aligned tuple size (same formula as ioguix nulldatahdrwidth):
+    -- Aligned tuple size (nulldatahdrwidth):
     -- = align(index_tuple_hdr_bm) + align(data_width)
     (
       index_tuple_hdr_bm
