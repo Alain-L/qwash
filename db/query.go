@@ -134,31 +134,6 @@ func sanitizeTableName(tableName string) string {
 	return pgx.Identifier{tableName}.Sanitize()
 }
 
-// printProgress prints a single-line progress that updates in place
-func printProgress(db *DB, tableName string, pass int) {
-	if db.SilentProgress {
-		return
-	}
-	tableWord := "tables"
-	if db.TotalTables == 1 {
-		tableWord = "table"
-	}
-	displayName := tableName
-	if len(displayName) > 40 {
-		displayName = displayName[:37] + "..."
-	}
-	fmt.Printf("\r\033[K%-40s | Pass %2d | %2d/%2d %s",
-		displayName, pass, db.CurrentTableIndex, db.TotalTables, tableWord)
-}
-
-// clearProgress clears the progress line and moves to next line
-func clearProgress(db *DB) {
-	if db.SilentProgress {
-		return
-	}
-	fmt.Print("\r\033[K")
-}
-
 // QueryRow executes a query that is expected to return a single row.
 func (db *DB) QueryRow(ctx context.Context, query string, args ...interface{}) pgx.Row {
 	return db.conn.QueryRow(ctx, query, args...)

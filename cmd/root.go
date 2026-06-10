@@ -18,13 +18,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Version information (set from main.go)
-var (
-	appVersion = "dev"
-	appCommit  = "none"
-	appDate    = "unknown"
-)
-
 // Global Flags
 var (
 	// Database connection
@@ -77,9 +70,6 @@ It provides estimation, reporting, and optionally helps remove unnecessary bloat
 
 // Execute runs the CLI
 func Execute(version, commit, date string) {
-	appVersion = version
-	appCommit = commit
-	appDate = date
 	rootCmd.Version = fmt.Sprintf("%s (commit: %s, built: %s)", version, commit, date)
 
 	initLogger()
