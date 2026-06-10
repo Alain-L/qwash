@@ -141,14 +141,14 @@ func DetectToastBloat(ctx context.Context, dbConn *db.DB) ([]ToastBloat, error) 
 
 	for rows.Next() {
 		var (
-			tableName  string
-			toastBytes int64
-			toastPages int
+			tableName   string
+			toastBytes  int64
+			toastPages  int
 			toastChunks int64
-			bloatPct   *float64
-			bloatSize  *int64
-			warning    *string
-			staleStats bool
+			bloatPct    *float64
+			bloatSize   *int64
+			warning     *string
+			staleStats  bool
 		)
 
 		err := rows.Scan(

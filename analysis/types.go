@@ -52,8 +52,8 @@ type ToastBloat struct {
 	ToastSize   int64    `json:"toast_size"`
 	ToastPages  int      `json:"toast_pages"`
 	ToastChunks int64    `json:"toast_chunks"`
-	BloatPct    *float64 `json:"bloat_pct,omitempty"`  // nil if < 10 MB or no ppc_ref
-	BloatSize   int64    `json:"bloat_size,omitempty"` // 0 if unreliable
-	Warning     string   `json:"warning,omitempty"`    // "< 10 MB" or "no chunks"
+	BloatPct    *float64 `json:"bloat_pct,omitempty"`   // nil if < 10 MB or no ppc_ref
+	BloatSize   int64    `json:"bloat_size,omitempty"`  // 0 if unreliable
+	Warning     string   `json:"warning,omitempty"`     // "< 10 MB" or "no chunks"
 	StaleStats  bool     `json:"stale_stats,omitempty"` // true if no VACUUM in last 24h
 }

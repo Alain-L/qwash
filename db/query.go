@@ -492,9 +492,9 @@ func (db *DB) GetBloatPages(tableName string) (int, error) {
 	row := db.conn.QueryRow(ctx, modifiedQuery)
 
 	var (
-		_           string   // table_name
-		_           int      // live_tup
-		_           int64    // dead_tup
+		_           string // table_name
+		_           int    // live_tup
+		_           int64  // dead_tup
 		minPages    int
 		actualPages int
 		_           int      // fillfactor
@@ -676,4 +676,3 @@ func (db *DB) ReindexTable(tableName string) error {
 
 	return nil
 }
-

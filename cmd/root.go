@@ -53,9 +53,9 @@ var (
 
 	// Debloat options
 	debloatFlag bool   // --debloat (-B)
-	fastFlag bool // --fast
-	slowFlag bool // --slow (1 page at a time with delay)
-	delayMs  int  // --delay (milliseconds between operations in slow mode)
+	fastFlag    bool   // --fast
+	slowFlag    bool   // --slow (1 page at a time with delay)
+	delayMs     int    // --delay (milliseconds between operations in slow mode)
 	dryRunFlag  bool   // --dry-run
 	reindexFlag bool   // --reindex
 	limitStr    string // --limit (stop after reducing X bloat: 500MB, 1GB, 50%)
@@ -769,7 +769,6 @@ func printParallelProgress(completed, total, workers int) {
 	}
 	fmt.Printf("\r\033[K[%s] %d/%d tables | %d %s", bar, completed, total, workers, workerWord)
 }
-
 
 // getTargetTables returns the list of tables to debloat based on flags
 func getTargetTables(connection *db.DB) ([]string, error) {

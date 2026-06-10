@@ -24,16 +24,16 @@ func DetectTableBloat(ctx context.Context, dbConn *db.DB) ([]BloatTable, error) 
 
 	for rows.Next() {
 		var (
-			tableName       string
-			liveTup         int
-			deadTup         int64
-			minPages        int
-			actualPages     int
-			fillfactor      int
-			relationSize    string   // pg_size_pretty output
-			toastSize       string
-			bloatSizeStr    string
-			bloatPct        *float64 // nullable
+			tableName    string
+			liveTup      int
+			deadTup      int64
+			minPages     int
+			actualPages  int
+			fillfactor   int
+			relationSize string // pg_size_pretty output
+			toastSize    string
+			bloatSizeStr string
+			bloatPct     *float64 // nullable
 		)
 
 		err := rows.Scan(
