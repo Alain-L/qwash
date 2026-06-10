@@ -3,7 +3,7 @@ package analysis
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 
 	"qwash/db"
@@ -12,9 +12,7 @@ import (
 
 // DetectTableBloat analyzes table bloat in PostgreSQL using the embedded bloat query.
 func DetectTableBloat(ctx context.Context, dbConn *db.DB) ([]BloatTable, error) {
-	if dbConn.Verbose {
-		log.Println("[INFO] Analyzing table bloat...")
-	}
+	slog.Info("Analyzing table bloat...")
 
 	rows, err := dbConn.Query(ctx, sql.TableBloatSQL)
 	if err != nil {
@@ -91,9 +89,7 @@ func DetectTableBloat(ctx context.Context, dbConn *db.DB) ([]BloatTable, error) 
 		bloatTables = append(bloatTables, tbl)
 	}
 
-	if dbConn.Verbose {
-		log.Printf("[INFO] Found %d tables with bloat information.\n", len(bloatTables))
-	}
+	slog.Info("Table bloat analysis complete", "tables", len(bloatTables))
 	return bloatTables, nil
 }
 

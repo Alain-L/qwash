@@ -3,7 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -82,8 +82,10 @@ func Execute(version, commit, date string) {
 	appDate = date
 	rootCmd.Version = fmt.Sprintf("%s (commit: %s, built: %s)", version, commit, date)
 
+	initLogger()
+
 	if err := rootCmd.Execute(); err != nil {
-		log.Fatalf("Error: %v", err)
+		fatal("command failed", "error", err)
 	}
 }
 
@@ -156,6 +158,12 @@ func init() {
 
 // executeAnalysis is the core function that orchestrates the pipeline
 func executeAnalysis(cmd *cobra.Command, args []string) {
+	// Raise verbosity to INFO when requested; otherwise INFO diagnostics stay
+	// quiet and only warnings/errors are shown.
+	if verboseFlag {
+		setLogLevel(slog.LevelInfo)
+	}
+
 	// Build connection config
 	dbConfig := db.Config{
 		Host:     getFirstOrDefault(host, "localhost"),
@@ -168,50 +176,50 @@ func executeAnalysis(cmd *cobra.Command, args []string) {
 
 	// Step 1: Validate flag combinations
 	if estimateFlag && debloatFlag {
-		log.Fatalf("[ERROR] --estimate (-E) and --debloat (-B) cannot be used together.")
+		fatal("--estimate (-E) and --debloat (-B) cannot be used together")
 	}
 
 	// --reindex requires --debloat
 	if reindexFlag && !debloatFlag {
-		log.Fatalf("[ERROR] --reindex requires --debloat (-B).")
+		fatal("--reindex requires --debloat (-B)")
 	}
 
 	// --fast, --slow, --dry-run require --debloat
 	if (fastFlag || slowFlag || dryRunFlag) && !debloatFlag {
-		log.Fatalf("[ERROR] --fast, --slow, and --dry-run require --debloat (-B).")
+		fatal("--fast, --slow, and --dry-run require --debloat (-B)")
 	}
 
 	// --fast and --slow are mutually exclusive
 	if fastFlag && slowFlag {
-		log.Fatalf("[ERROR] --fast and --slow are mutually exclusive.")
+		fatal("--fast and --slow are mutually exclusive")
 	}
 
 	// --delay requires --slow
 	if cmd.Flags().Changed("delay") && !slowFlag {
-		log.Fatalf("[ERROR] --delay can only be used with --slow mode.")
+		fatal("--delay can only be used with --slow mode")
 	}
 
 	// Validate --delay value
 	if delayMs < 0 {
-		log.Fatalf("[ERROR] --delay must be >= 0 (got %d).", delayMs)
+		fatal("--delay must be >= 0", "got", delayMs)
 	}
 	if delayMs > 10000 {
-		log.Fatalf("[ERROR] --delay must be <= 10000ms (got %d). Use lower values for reasonable performance.", delayMs)
+		fatal("--delay must be <= 10000ms; use lower values for reasonable performance", "got", delayMs)
 	}
 
 	// --jobs requires --debloat
 	if cmd.Flags().Changed("jobs") && !debloatFlag {
-		log.Fatalf("[ERROR] --jobs (-j) requires --debloat (-B).")
+		fatal("--jobs (-j) requires --debloat (-B)")
 	}
 
 	// Validate --limit value (early validation before DB connection)
 	if limitStr != "" {
 		if _, _, err := parseLimit(limitStr); err != nil {
-			log.Fatalf("[ERROR] Invalid --limit value: %v", err)
+			fatal("invalid --limit value", "error", err)
 		}
 		// --limit requires --debloat
 		if !debloatFlag {
-			log.Fatalf("[ERROR] --limit requires --debloat (-B).")
+			fatal("--limit requires --debloat (-B)")
 		}
 	}
 
@@ -234,7 +242,7 @@ func executeAnalysis(cmd *cobra.Command, args []string) {
 		}
 		connection, err := db.Connect(dbConfig, verboseFlag)
 		if err != nil {
-			log.Fatalf("Connection failed: %v", err)
+			fatal("connection failed", "error", err)
 		}
 		defer connection.Close()
 
@@ -252,7 +260,7 @@ func executeAnalysis(cmd *cobra.Command, args []string) {
 	// Step 3: Establish database connection
 	connection, err := db.Connect(dbConfig, verboseFlag)
 	if err != nil {
-		log.Fatalf("Failed to connect: %v", err)
+		fatal("failed to connect", "error", err)
 	}
 	defer connection.Close()
 
@@ -315,7 +323,7 @@ func runEstimate(connection *db.DB) {
 	if heapFlag {
 		tableBloat, err = analysis.DetectTableBloat(context.Background(), connection)
 		if err != nil {
-			log.Fatalf("Failed to analyze table bloat: %v", err)
+			fatal("failed to analyze table bloat", "error", err)
 		}
 	}
 
@@ -324,7 +332,7 @@ func runEstimate(connection *db.DB) {
 	if toastFlag {
 		toastBloat, err = analysis.DetectToastBloat(context.Background(), connection)
 		if err != nil {
-			log.Printf("[WARNING] Failed to analyze TOAST bloat: %v", err)
+			slog.Warn("failed to analyze TOAST bloat", "error", err)
 			// Continue without TOAST data
 		}
 	}
@@ -334,7 +342,7 @@ func runEstimate(connection *db.DB) {
 	if btreeFlag {
 		indexBloat, err = analysis.DetectBtreeIndexBloat(context.Background(), connection)
 		if err != nil {
-			log.Printf("[WARNING] Failed to analyze B-Tree index bloat: %v", err)
+			slog.Warn("failed to analyze B-Tree index bloat", "error", err)
 			// Continue without index data
 		}
 	}
@@ -469,7 +477,7 @@ func runDebloat(connection *db.DB) {
 	// Parse limit if specified
 	limitBytes, limitPercent, err := parseLimit(limitStr)
 	if err != nil {
-		log.Fatalf("[ERROR] Invalid --limit value: %v", err)
+		fatal("invalid --limit value", "error", err)
 	}
 
 	// Show mode (verbose only, except dry-run which is always shown in text mode)
@@ -490,7 +498,7 @@ func runDebloat(connection *db.DB) {
 	// Get list of tables to process
 	tables, err := getTargetTables(connection)
 	if err != nil {
-		log.Fatalf("Failed to get target tables: %v", err)
+		fatal("failed to get target tables", "error", err)
 	}
 
 	if len(tables) == 0 {
@@ -656,7 +664,7 @@ func runDebloatParallel(connection *db.DB, tables []string, numWorkers int, limi
 	for i := 0; i < numWorkers; i++ {
 		worker, err := connection.NewWorkerConnection(i + 1)
 		if err != nil {
-			log.Fatalf("Failed to create worker connection %d: %v", i+1, err)
+			fatal("failed to create worker connection", "worker", i+1, "error", err)
 		}
 		workers[i] = worker
 	}

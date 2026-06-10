@@ -3,7 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -45,12 +45,12 @@ func Connect(cfg Config, verbose bool) (*DB, error) {
 
 	conn, err := pgx.Connect(ctx, connString)
 	if err != nil {
-		log.Printf("[ERROR] Unable to connect to database: %v", err)
+		slog.Error("unable to connect to database", "error", err)
 		return nil, err
 	}
 
 	if verbose {
-		log.Printf("[INFO] Successfully connected to %s at %s:%s", cfg.Database, cfg.Host, cfg.Port)
+		slog.Info("successfully connected", "database", cfg.Database, "host", cfg.Host, "port", cfg.Port)
 	}
 
 	return &DB{conn: conn, config: cfg, Verbose: verbose}, nil
@@ -78,7 +78,7 @@ func (db *DB) Close() {
 	if db.conn != nil {
 		db.conn.Close(context.Background())
 		if db.Verbose {
-			log.Println("[INFO] Database connection closed.")
+			slog.Info("database connection closed")
 		}
 	}
 }

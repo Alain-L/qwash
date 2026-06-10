@@ -3,7 +3,7 @@ package analysis
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 
 	"qwash/db"
@@ -179,9 +179,7 @@ ORDER BY bloat_pct DESC NULLS LAST, (be.relpages * be.block_size) DESC
 // DetectBtreeIndexBloat analyzes B-Tree indexes for bloat using catalog statistics.
 // No helper function needed — this is a pure SELECT on system catalogs.
 func DetectBtreeIndexBloat(ctx context.Context, dbConn *db.DB) ([]BloatIndex, error) {
-	if dbConn.Verbose {
-		log.Println("[INFO] Analyzing B-Tree index bloat...")
-	}
+	slog.Info("Analyzing B-Tree index bloat...")
 
 	rows, err := dbConn.Query(ctx, btreeBloatQuery)
 	if err != nil {
@@ -262,9 +260,7 @@ func DetectBtreeIndexBloat(ctx context.Context, dbConn *db.DB) ([]BloatIndex, er
 		results = append(results, idx)
 	}
 
-	if dbConn.Verbose {
-		log.Printf("[INFO] Found %d B-Tree indexes.\n", len(results))
-	}
+	slog.Info("B-Tree index analysis complete", "indexes", len(results))
 
 	return results, nil
 }

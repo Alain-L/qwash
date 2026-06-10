@@ -3,7 +3,8 @@ package output
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
+	"os"
 	"qwash/analysis"
 	"sort"
 	"time"
@@ -199,7 +200,8 @@ func PrintDebloatJSON(results []analysis.DebloatResult, totalDuration time.Durat
 
 	jsonBytes, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
-		log.Fatalf("Failed to marshal JSON: %v", err)
+		slog.Error("failed to marshal JSON", "error", err)
+		os.Exit(1)
 	}
 	fmt.Println(string(jsonBytes))
 }

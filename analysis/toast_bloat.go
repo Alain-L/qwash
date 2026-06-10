@@ -3,7 +3,7 @@ package analysis
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 
 	"qwash/db"
@@ -117,9 +117,7 @@ const dropHelperFunctionSQL = `DROP FUNCTION IF EXISTS pg_temp._qwash_sample_chu
 // Requires recent VACUUM (not just ANALYZE) for accurate pg_class stats.
 // Bloat estimation is only reliable for TOAST tables >= 10 MB.
 func DetectToastBloat(ctx context.Context, dbConn *db.DB) ([]ToastBloat, error) {
-	if dbConn.Verbose {
-		log.Println("[INFO] Analyzing TOAST bloat...")
-	}
+	slog.Info("Analyzing TOAST bloat...")
 
 	// Create helper function
 	_, err := dbConn.Exec(ctx, createHelperFunctionSQL)
@@ -198,9 +196,7 @@ func DetectToastBloat(ctx context.Context, dbConn *db.DB) ([]ToastBloat, error) 
 		results = append(results, tb)
 	}
 
-	if dbConn.Verbose {
-		log.Printf("[INFO] Found %d tables with TOAST data.\n", len(results))
-	}
+	slog.Info("TOAST bloat analysis complete", "tables", len(results))
 
 	return results, nil
 }
