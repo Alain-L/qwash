@@ -45,7 +45,8 @@ func Connect(cfg Config, verbose bool) (*DB, error) {
 
 	conn, err := pgx.Connect(ctx, connString)
 	if err != nil {
-		slog.Error("unable to connect to database", "error", err)
+		// Return the error to the caller, which is responsible for logging.
+		// Logging here as well produced a duplicate error line.
 		return nil, err
 	}
 
