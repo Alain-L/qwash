@@ -851,29 +851,76 @@ func (db *DB) releaseTableLock(tableName string) error {
 	return nil
 }
 
-// ReindexTable runs REINDEX CONCURRENTLY on a table to rebuild all its indexes.
-func (db *DB) ReindexTable(tableName string) error {
-	ctx := context.Background()
-
-	// REINDEX CONCURRENTLY requires PostgreSQL 12+
-	// It rebuilds indexes without blocking writes
-	query := fmt.Sprintf("REINDEX TABLE CONCURRENTLY %s", sanitizeTableName(tableName))
+// ReindexTable rebuilds a table's indexes with REINDEX TABLE CONCURRENTLY,
+// which does not block writes. It deliberately does NOT fall back to a plain
+// (blocking) REINDEX: that would contradict the tool's non-blocking promise.
+//
+// REINDEX CONCURRENTLY requires PostgreSQL 12+; on older servers the function
+// refuses rather than silently taking an exclusive lock. When a CONCURRENTLY
+// run fails (deadlock, timeout, cancellation), PostgreSQL can leave transient
+// invalid indexes behind (suffixed _ccnew/_ccold); these are cleaned up so
+// they don't accumulate.
+func (db *DB) ReindexTable(ctx context.Context, tableName string) error {
+	if db.ServerVersionNum() < 120000 {
+		return fmt.Errorf("--reindex needs REINDEX CONCURRENTLY (PostgreSQL 12+); refusing to run a blocking REINDEX on '%s'", tableName)
+	}
 
 	if db.Verbose {
 		fmt.Printf("  Reindexing %s...\n", tableName)
 	}
-	_, err := db.conn.Exec(ctx, query)
+	_, err := db.conn.Exec(ctx, fmt.Sprintf("REINDEX TABLE CONCURRENTLY %s", sanitizeTableName(tableName)))
 	if err != nil {
-		// If CONCURRENTLY fails (e.g., PG < 12), try regular REINDEX
-		if db.Verbose {
-			fmt.Println("  REINDEX CONCURRENTLY failed, trying regular REINDEX...")
+		// No blocking fallback. Clean up any invalid leftovers from the failed
+		// concurrent rebuild so they don't pile up across runs.
+		if cleaned := db.dropInvalidReindexLeftovers(ctx, tableName); cleaned != "" {
+			return fmt.Errorf("REINDEX CONCURRENTLY failed (%w); cleaned up leftover invalid index(es): %s", err, cleaned)
 		}
-		query = fmt.Sprintf("REINDEX TABLE %s", sanitizeTableName(tableName))
-		_, err = db.conn.Exec(ctx, query)
-		if err != nil {
-			return fmt.Errorf("REINDEX failed: %w", err)
-		}
+		return fmt.Errorf("REINDEX CONCURRENTLY failed: %w", err)
 	}
 
 	return nil
+}
+
+// dropInvalidReindexLeftovers drops invalid transient indexes (named
+// *_ccnew/*_ccold) left on a table by a failed REINDEX ... CONCURRENTLY.
+// It returns a comma-separated list of the indexes it dropped (empty if none).
+// Errors while dropping are ignored: this is best-effort cleanup.
+func (db *DB) dropInvalidReindexLeftovers(ctx context.Context, tableName string) string {
+	schemaName, relName := "public", tableName
+	if strings.Contains(tableName, ".") {
+		parts := strings.SplitN(tableName, ".", 2)
+		schemaName, relName = parts[0], parts[1]
+	}
+
+	rows, err := db.conn.Query(ctx, `
+		SELECT ns.nspname, ic.relname
+		FROM pg_index i
+		JOIN pg_class ic ON ic.oid = i.indexrelid
+		JOIN pg_class tc ON tc.oid = i.indrelid
+		JOIN pg_namespace ns ON ns.oid = ic.relnamespace
+		JOIN pg_namespace tn ON tn.oid = tc.relnamespace
+		WHERE NOT i.indisvalid
+		  AND tn.nspname = $1 AND tc.relname = $2
+		  AND (ic.relname LIKE '%\_ccnew' OR ic.relname LIKE '%\_ccold'
+		       OR ic.relname ~ '_ccnew[0-9]+$' OR ic.relname ~ '_ccold[0-9]+$')
+	`, schemaName, relName)
+	if err != nil {
+		return ""
+	}
+	var leftovers []string
+	for rows.Next() {
+		var ns, idx string
+		if rows.Scan(&ns, &idx) == nil {
+			leftovers = append(leftovers, ns+"."+idx)
+		}
+	}
+	rows.Close()
+
+	var dropped []string
+	for _, full := range leftovers {
+		if _, e := db.conn.Exec(ctx, fmt.Sprintf("DROP INDEX CONCURRENTLY IF EXISTS %s", sanitizeTableName(full))); e == nil {
+			dropped = append(dropped, full)
+		}
+	}
+	return strings.Join(dropped, ", ")
 }

@@ -1007,7 +1007,7 @@ func processTable(ctx context.Context, connection *db.DB, table string, bloatPag
 		if verboseFlag {
 			fmt.Printf("  %s: reindexing...\n", table)
 		}
-		if err := connection.ReindexTable(table); err != nil {
+		if err := connection.ReindexTable(ctx, table); err != nil {
 			result.Error = fmt.Sprintf("reindex failed: %v", err)
 		} else {
 			result.Reindexed = true
