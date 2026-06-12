@@ -11,6 +11,9 @@ type DebloatResult struct {
 	Reindexed         bool   `json:"reindexed,omitempty"`
 	Error             string `json:"error,omitempty"`
 	DryRun            bool   `json:"dry_run,omitempty"`
+	// Skipped marks a table that was not processed because the --limit was
+	// reached. It is an expected outcome, distinct from an error.
+	Skipped bool `json:"skipped,omitempty"`
 }
 
 // BloatIndex represents bloat information for a B-Tree index.

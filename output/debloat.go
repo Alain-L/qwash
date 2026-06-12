@@ -27,10 +27,15 @@ func PrintDebloatSummary(results []analysis.DebloatResult, totalDuration time.Du
 	var totalBytesRemoved int64
 	var tablesCompacted int
 	var errors int
+	var skipped int
 	var errorList []analysis.DebloatResult
+	var skippedList []analysis.DebloatResult
 
 	for _, r := range results {
-		if r.Error != "" {
+		if r.Skipped {
+			skipped++
+			skippedList = append(skippedList, r)
+		} else if r.Error != "" {
 			errors++
 			errorList = append(errorList, r)
 		} else if r.BloatRemoved > 0 {
@@ -39,22 +44,30 @@ func PrintDebloatSummary(results []analysis.DebloatResult, totalDuration time.Du
 			tablesCompacted++
 		}
 	}
+	processed := len(results) - skipped
 
 	// Header
 	tableWord := "tables"
 	if len(results) == 1 {
 		tableWord = "table"
 	}
-	if len(results) > 0 && results[0].DryRun {
+	switch {
+	case len(results) > 0 && results[0].DryRun:
 		fmt.Printf("qwash – dry-run on %d %s\n\n", len(results), tableWord)
-	} else {
+	case skipped > 0:
+		fmt.Printf("qwash – %d %s (%d compacted, %d skipped: limit reached)\n\n",
+			len(results), tableWord, tablesCompacted, skipped)
+	default:
 		fmt.Printf("qwash – %d %s processed\n\n", len(results), tableWord)
 	}
 
 	// Summary section
 	fmt.Println(bold("SUMMARY"))
 	fmt.Println()
-	fmt.Printf("  Tables processed          : %d\n", len(results))
+	fmt.Printf("  Tables processed          : %d\n", processed)
+	if skipped > 0 {
+		fmt.Printf("  Skipped (limit reached)   : %d\n", skipped)
+	}
 
 	// Mode
 	modeName := "default"
@@ -112,6 +125,16 @@ func PrintDebloatSummary(results []analysis.DebloatResult, totalDuration time.Du
 		fmt.Println()
 	}
 
+	// Skipped section (limit reached): an expected outcome, not a failure.
+	if len(skippedList) > 0 {
+		fmt.Println(bold("SKIPPED") + " (limit reached)")
+		fmt.Println()
+		for _, r := range skippedList {
+			fmt.Printf("  %s\n", r.Table)
+		}
+		fmt.Println()
+	}
+
 	// Detail section: per-table breakdown sorted by bloat removed (descending)
 	if tablesCompacted > 0 {
 		var compacted []analysis.DebloatResult
@@ -159,9 +182,12 @@ func PrintDebloatJSON(results []analysis.DebloatResult, totalDuration time.Durat
 	var totalBytesRemoved int64
 	var tablesCompacted int
 	var errors int
+	var skipped int
 
 	for _, r := range results {
-		if r.Error != "" {
+		if r.Skipped {
+			skipped++
+		} else if r.Error != "" {
 			errors++
 		} else if r.BloatRemoved > 0 {
 			totalPagesRemoved += r.BloatRemoved
@@ -174,6 +200,7 @@ func PrintDebloatJSON(results []analysis.DebloatResult, totalDuration time.Durat
 		Summary struct {
 			TablesProcessed   int    `json:"tables_processed"`
 			TablesCompacted   int    `json:"tables_compacted"`
+			Skipped           int    `json:"skipped,omitempty"`
 			Errors            int    `json:"errors,omitempty"`
 			Mode              string `json:"mode"`
 			Workers           int    `json:"workers,omitempty"`
@@ -185,8 +212,9 @@ func PrintDebloatJSON(results []analysis.DebloatResult, totalDuration time.Durat
 		Results []analysis.DebloatResult `json:"results"`
 	}{}
 
-	data.Summary.TablesProcessed = len(results)
+	data.Summary.TablesProcessed = len(results) - skipped
 	data.Summary.TablesCompacted = tablesCompacted
+	data.Summary.Skipped = skipped
 	data.Summary.Errors = errors
 	data.Summary.Mode = mode
 	if opts.Workers > 1 {

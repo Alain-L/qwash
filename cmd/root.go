@@ -692,9 +692,9 @@ func runDebloat(ctx context.Context, connection *db.DB) {
 	}
 
 	// Signal per-table failures through the exit code (for automation).
-	// "skipped (limit reached)" is an expected outcome, not a failure.
+	// Skipped tables (limit reached) carry no error and don't count.
 	for _, r := range results {
-		if r.Error != "" && r.Error != "skipped (limit reached)" {
+		if r.Error != "" {
 			exitCode = 2
 			break
 		}
@@ -719,12 +719,13 @@ func runDebloatSequential(ctx context.Context, connection *db.DB, tables []strin
 			break
 		}
 
-		// Check if limit is reached
+		// Check if limit is reached: record the remaining tables as skipped
+		// (not processed) so the report and counts match parallel mode.
 		if limitBytes > 0 && totalBloatRemoved >= limitBytes {
-			if verboseFlag {
-				fmt.Printf("  %s: skipped (limit reached)\n", table)
-			}
 			limitReached = true
+			for _, skip := range tables[i:] {
+				results = append(results, analysis.DebloatResult{Table: skip, Skipped: true})
+			}
 			break
 		}
 
@@ -810,11 +811,10 @@ func runDebloatParallel(ctx context.Context, connection *db.DB, tables []string,
 				// Check if limit reached before processing
 				if limitBytes > 0 && atomic.LoadInt64(&totalBloatRemoved) >= limitBytes {
 					atomic.StoreInt64(&limitReached, 1)
-					// Still need to report skipped tables
-					resultChan <- analysis.DebloatResult{
-						Table: table,
-						Error: "skipped (limit reached)",
-					}
+					// Report the table as skipped (an expected outcome, not an
+					// error), and count it so the progress bar still reaches 100%.
+					resultChan <- analysis.DebloatResult{Table: table, Skipped: true}
+					atomic.AddInt64(&tablesCompleted, 1)
 					continue
 				}
 

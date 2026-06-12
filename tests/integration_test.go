@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -998,6 +999,67 @@ func TestCLIDebloatWithLimitSize(t *testing.T) {
 	// Output should mention limit was reached or show removal amount
 	if strings.Contains(output, "limit reached") {
 		t.Log("Limit was reached as expected")
+	}
+}
+
+// TestCLIDebloatLimitSkippedNotErrors verifies that tables skipped because the
+// --limit was reached are reported as skipped (not errors), don't trigger a
+// non-zero exit code, and are counted consistently.
+func TestCLIDebloatLimitSkippedNotErrors(t *testing.T) {
+	conn := setupTestDB(t)
+	for _, name := range []string{"sk1", "sk2", "sk3", "sk4", "sk5"} {
+		createBloatedTable(t, conn, name, 8000, 50)
+	}
+	conn.Close()
+
+	// A tiny limit ensures most tables are skipped.
+	output, err := runQwashCLI(t, "--debloat", "--limit", "50KB", "--jobs", "1",
+		"-t", "sk1", "-t", "sk2", "-t", "sk3", "-t", "sk4", "-t", "sk5", "--json")
+	if err != nil {
+		t.Fatalf("skipped tables must not cause a non-zero exit: %v\nOutput: %s", err, output)
+	}
+
+	var result struct {
+		Summary struct {
+			TablesCompacted int  `json:"tables_compacted"`
+			Skipped         int  `json:"skipped"`
+			Errors          int  `json:"errors"`
+			LimitReached    bool `json:"limit_reached"`
+		} `json:"summary"`
+		Results []struct {
+			Table   string `json:"table"`
+			Skipped bool   `json:"skipped"`
+			Error   string `json:"error"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("Failed to parse JSON: %v\nOutput: %s", err, output)
+	}
+
+	if result.Summary.Skipped == 0 {
+		t.Errorf("Expected some tables to be skipped, got 0\nOutput: %s", output)
+	}
+	if result.Summary.Errors != 0 {
+		t.Errorf("Skipped tables must not be counted as errors, got errors=%d", result.Summary.Errors)
+	}
+	if !result.Summary.LimitReached {
+		t.Errorf("Expected limit_reached=true")
+	}
+	// Every result is either compacted or skipped, never an error here.
+	for _, r := range result.Results {
+		if r.Error != "" {
+			t.Errorf("Table %s reported an error %q; expected only compacted/skipped", r.Table, r.Error)
+		}
+	}
+
+	// Text report must use a SKIPPED section, not ERRORS.
+	textOut, _ := runQwashCLI(t, "--debloat", "--limit", "50KB", "--jobs", "1",
+		"-t", "sk1", "-t", "sk2", "-t", "sk3", "-t", "sk4", "-t", "sk5")
+	if strings.Contains(textOut, "ERRORS") {
+		t.Errorf("Text report should not contain an ERRORS section for skips\nOutput: %s", textOut)
+	}
+	if !strings.Contains(textOut, "SKIPPED") {
+		t.Errorf("Text report should contain a SKIPPED section\nOutput: %s", textOut)
 	}
 }
 

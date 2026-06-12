@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **`--limit`: skipped tables are no longer reported as errors**: tables left untouched because the limit was reached now appear in a `SKIPPED (limit reached)` section (not `ERRORS`), are counted separately from failures, and reported consistently in sequential and parallel modes. JSON gains a `summary.skipped` count and a `skipped` flag per result (instead of an `error` string).
 - **Never-analyzed tables are surfaced, not hidden**: a table with stale/missing statistics (never analyzed) used to be silently reported as bloat-free; it now appears in a `NOT ESTIMATED (stale statistics)` section with a hint to run `ANALYZE`, and is flagged `stale_stats` in JSON.
 - **B-Tree indexes without column statistics are no longer dropped**: the index bloat query used an `INNER JOIN` on `pg_stats`, silently omitting indexes whose key column had no statistics; they are now listed and flagged `is_na` (unreliable).
 - **Preflight safety checks before compaction**: a table is now refused (and the run continues with the others) when the current role can neither own nor superuser-VACUUM it — previously the UPDATEs ran but VACUUM silently reclaimed nothing, *increasing* bloat — or when it is in a logical-replication publication without a usable REPLICA IDENTITY (the UPDATEs would fail). `ENABLE ALWAYS`/`REPLICA` triggers and publication membership are surfaced as warnings.
