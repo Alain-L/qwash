@@ -154,6 +154,13 @@ SELECT
     (100.0 * GREATEST(0, actual_pages - estimated_min_pages)
      / NULLIF(actual_pages, 0)
     )::numeric, 2
-  ) AS bloat_pct
+  ) AS bloat_pct,
+  -- Stale/missing statistics: the row count is unknown (reltuples < 0) or the
+  -- catalog reports 0 pages while the table actually holds data on disk
+  -- (relpages not yet updated by ANALYZE/VACUUM). The estimate is unusable.
+  (reltuples < 0
+   OR (actual_pages = 0
+       AND pg_relation_size(format('%I.%I', schemaname, tblname)::regclass) > 0)
+  ) AS stale_stats
 FROM bloat_estimation
 ORDER BY bloat_pct DESC;

@@ -9,10 +9,22 @@ import (
 // PrintBloatSummary displays a textual report of table and index bloat.
 // Tables are grouped by bloat severity level with summary statistics at the top.
 func PrintBloatSummary(tableBloat []analysis.BloatTable, indexBloat []analysis.BloatIndex) {
+	// Separate tables we could estimate from those with stale/missing
+	// statistics (never analyzed): the latter cannot be estimated and must be
+	// surfaced rather than counted as "no bloat".
+	var estimated, stale []analysis.BloatTable
+	for _, tbl := range tableBloat {
+		if tbl.StaleStats {
+			stale = append(stale, tbl)
+		} else {
+			estimated = append(estimated, tbl)
+		}
+	}
+
 	// Calculate summary statistics
 	var totalDBSize, totalBloatSize int64
 	var tablesWithBloat int
-	for _, tbl := range tableBloat {
+	for _, tbl := range estimated {
 		totalDBSize += tbl.TableSize
 		totalBloatSize += tbl.BloatSize
 		if tbl.BloatRatio >= 10.0 {
@@ -24,13 +36,24 @@ func PrintBloatSummary(tableBloat []analysis.BloatTable, indexBloat []analysis.B
 	if totalDBSize > 0 {
 		totalBloatPercent = float64(totalBloatSize) * 100.0 / float64(totalDBSize)
 	}
+	withBloatPct := 0.0
+	if len(estimated) > 0 {
+		withBloatPct = float64(tablesWithBloat) * 100.0 / float64(len(estimated))
+	}
 
 	// Print summary header
-	fmt.Printf("qwash – %d tables analyzed\n\n", len(tableBloat))
+	if len(stale) > 0 {
+		fmt.Printf("qwash – %d tables analyzed (%d not estimated)\n\n", len(estimated), len(stale))
+	} else {
+		fmt.Printf("qwash – %d tables analyzed\n\n", len(estimated))
+	}
 	fmt.Println(bold("SUMMARY"))
 	fmt.Println()
-	fmt.Printf("  Tables analyzed           : %d\n", len(tableBloat))
-	fmt.Printf("  Tables with bloat         : %d (%.1f%%)\n", tablesWithBloat, float64(tablesWithBloat)*100.0/float64(len(tableBloat)))
+	fmt.Printf("  Tables analyzed           : %d\n", len(estimated))
+	fmt.Printf("  Tables with bloat         : %d (%.1f%%)\n", tablesWithBloat, withBloatPct)
+	if len(stale) > 0 {
+		fmt.Printf("  Not estimated (no stats)  : %d\n", len(stale))
+	}
 	fmt.Println()
 	fmt.Printf("  Total database size       : %s\n", FormatSize(totalDBSize))
 	fmt.Printf("  Total bloat detected      : %s (%.1f%%)\n", FormatSize(totalBloatSize), totalBloatPercent)
@@ -39,7 +62,7 @@ func PrintBloatSummary(tableBloat []analysis.BloatTable, indexBloat []analysis.B
 
 	// Group tables by bloat severity
 	var critical, high, medium []analysis.BloatTable
-	for _, tbl := range tableBloat {
+	for _, tbl := range estimated {
 		if tbl.BloatRatio >= 50.0 {
 			critical = append(critical, tbl)
 		} else if tbl.BloatRatio >= 30.0 {
@@ -140,6 +163,28 @@ func PrintBloatSummary(tableBloat []analysis.BloatTable, indexBloat []analysis.B
 		fmt.Println()
 	}
 
+	// Tables that could not be estimated (stale/missing statistics)
+	if len(stale) > 0 {
+		sort.Slice(stale, func(i, j int) bool {
+			return stale[i].Schema+"."+stale[i].TableName < stale[j].Schema+"."+stale[j].TableName
+		})
+		fmt.Println(bold("NOT ESTIMATED") + " (stale statistics)")
+		fmt.Println()
+		fmt.Printf("  %-40s %12s\n", "Table", "Size")
+		fmt.Println("  " + repeatString("-", 54))
+		for _, tbl := range stale {
+			tableName := fmt.Sprintf("%s.%s", tbl.Schema, tbl.TableName)
+			if len(tableName) > 40 {
+				tableName = tableName[:37] + "..."
+			}
+			fmt.Printf("  %-40s %12s\n", tableName, FormatSize(tbl.TableSize))
+		}
+		fmt.Println()
+		fmt.Println("  These tables were never analyzed; their bloat cannot be estimated.")
+		fmt.Println("  Run ANALYZE (or VACUUM ANALYZE) on them, then re-run qwash.")
+		fmt.Println()
+	}
+
 	// Display index bloat summary (if available)
 	if len(indexBloat) > 0 {
 		fmt.Println(bold("INDEX BLOAT"))
@@ -203,6 +248,17 @@ func PrintDetailedBloat(tables []analysis.BloatTable) {
 		tableName := fmt.Sprintf("%s.%s", tbl.Schema, tbl.TableName)
 		fmt.Println(tableName)
 		fmt.Println()
+		if tbl.StaleStats {
+			fmt.Printf("  Size        : %s\n", FormatSize(tbl.TableSize))
+			fmt.Printf("  Bloat       : not estimated (stale statistics)\n")
+			fmt.Printf("  Hint        : run ANALYZE %s, then re-run qwash\n", tableName)
+			fmt.Println()
+			if i < len(tables)-1 {
+				fmt.Println("  ---")
+				fmt.Println()
+			}
+			continue
+		}
 		fmt.Printf("  Size        : %s\n", FormatSize(tbl.TableSize))
 		fmt.Printf("  Bloat       : %s\n", FormatSize(tbl.BloatSize))
 		fmt.Printf("  Bloat %%     : %.2f%%\n", tbl.BloatRatio)

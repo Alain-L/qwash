@@ -34,6 +34,7 @@ func DetectTableBloat(ctx context.Context, dbConn *db.DB) ([]BloatTable, error) 
 			toastSize   int64 // TOAST_size, raw bytes (unused for now)
 			bloatSize   int64 // bloat_size, raw bytes
 			bloatPct    *float64
+			staleStats  bool
 		)
 
 		err := rows.Scan(
@@ -47,6 +48,7 @@ func DetectTableBloat(ctx context.Context, dbConn *db.DB) ([]BloatTable, error) 
 			&toastSize,
 			&bloatSize,
 			&bloatPct,
+			&staleStats,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("error scanning row: %w", err)
@@ -81,6 +83,7 @@ func DetectTableBloat(ctx context.Context, dbConn *db.DB) ([]BloatTable, error) 
 			LiveTuples: int64(liveTup),
 			DeadTuples: deadTup,
 			FillFactor: fillfactor,
+			StaleStats: staleStats,
 		}
 
 		bloatTables = append(bloatTables, tbl)

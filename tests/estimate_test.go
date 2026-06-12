@@ -22,6 +22,7 @@ type EstimateJSON struct {
 		LiveTuples int64   `json:"live_tuples"`
 		DeadTuples int64   `json:"dead_tuples"`
 		FillFactor int     `json:"fill_factor"`
+		StaleStats bool    `json:"stale_stats"`
 	} `json:"tables"`
 	Indexes []struct {
 		Schema     string  `json:"schema"`
@@ -36,6 +37,49 @@ type EstimateJSON struct {
 // =============================================================================
 // ESTIMATE FLAG COMBINATION TESTS
 // =============================================================================
+
+// TestEstimateStaleStatsSurfaced verifies that a never-analyzed table is
+// flagged stale (and not silently reported as bloat-free), so the user knows
+// to run ANALYZE rather than trusting a "no bloat" result.
+func TestEstimateStaleStatsSurfaced(t *testing.T) {
+	conn := setupTestDB(t)
+	ctx := context.Background()
+	// A bloated table that is deliberately NEVER analyzed: reltuples stays -1
+	// (PG14+) and relpages stays 0 while the file holds data.
+	if _, err := conn.Exec(ctx, `
+		CREATE TABLE stale_demo (id serial primary key, v text) WITH (autovacuum_enabled = false);
+		INSERT INTO stale_demo (v) SELECT repeat('x', 80) FROM generate_series(1, 5000);
+		DELETE FROM stale_demo WHERE id % 2 = 0;
+	`); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	conn.Close()
+
+	output, err := runQwashCLI(t, "--estimate", "-t", "stale_demo", "--json")
+	if err != nil {
+		t.Fatalf("CLI failed: %v\nOutput: %s", err, output)
+	}
+
+	var result EstimateJSON
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("Failed to parse JSON: %v\nOutput: %s", err, output)
+	}
+	if len(result.Tables) != 1 {
+		t.Fatalf("Expected 1 table in output, got %d\nOutput: %s", len(result.Tables), output)
+	}
+	if !result.Tables[0].StaleStats {
+		t.Errorf("Never-analyzed table should be flagged stale_stats=true, got false")
+	}
+
+	// And the text report must list it under NOT ESTIMATED, not as 0% bloat.
+	textOut, err := runQwashCLI(t, "--estimate", "-t", "stale_demo")
+	if err != nil {
+		t.Fatalf("CLI (text) failed: %v\nOutput: %s", err, textOut)
+	}
+	if !strings.Contains(textOut, "stale statistics") && !strings.Contains(textOut, "not estimated") {
+		t.Errorf("Text report should mention stale statistics\nOutput: %s", textOut)
+	}
+}
 
 // TestEstimateBasic tests basic --estimate output (text mode)
 func TestEstimateBasic(t *testing.T) {

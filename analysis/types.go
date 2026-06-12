@@ -42,6 +42,9 @@ type BloatTable struct {
 	LiveTuples int64 `json:"live_tuples"`
 	DeadTuples int64 `json:"dead_tuples"`
 	FillFactor int   `json:"fill_factor"`
+	// StaleStats is true when statistics are missing/stale (never analyzed),
+	// so the bloat estimate is unusable and the table needs ANALYZE.
+	StaleStats bool `json:"stale_stats,omitempty"`
 }
 
 // ToastBloat represents bloat information for a TOAST table.
