@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"qwash/db"
 
@@ -397,6 +398,40 @@ func TestDebloatSlowWithDelay(t *testing.T) {
 	if finalPages >= initialPages {
 		t.Errorf("Expected page count to decrease: initial=%d, final=%d", initialPages, finalPages)
 	}
+}
+
+// TestDelayActuallyThrottles verifies that DelayMs introduces a real pause
+// between page rounds (regression test: DelayMs used to be silently ignored,
+// so --slow --delay ran at full speed).
+func TestDelayActuallyThrottles(t *testing.T) {
+	conn := setupTestDB(t)
+	defer conn.Close()
+
+	tableName := "test_delay_throttle"
+	createBloatedTable(t, conn, tableName, 2000, 50)
+
+	bloatPages := getBloatPages(t, conn, tableName)
+	if bloatPages < 5 {
+		t.Skip("Not enough bloat to measure throttling")
+	}
+
+	// One compaction pass processes roughly bloatPages page rounds, each of
+	// which must sleep DelayMs. Assert on half of that as a safety margin
+	// against estimation drift between this call and the one made inside
+	// CompactTableUpdate.
+	conn.DelayMs = 20
+	start := time.Now()
+	if err := conn.CompactTableUpdate(tableName); err != nil {
+		t.Fatalf("CompactTableUpdate failed: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	minExpected := time.Duration(bloatPages/2) * 20 * time.Millisecond
+	if elapsed < minExpected {
+		t.Errorf("Expected at least %v of throttling for %d bloat pages with 20ms delay, took %v",
+			minExpected, bloatPages, elapsed)
+	}
+	t.Logf("Compaction with 20ms delay over ~%d bloat pages took %v", bloatPages, elapsed)
 }
 
 // =============================================================================

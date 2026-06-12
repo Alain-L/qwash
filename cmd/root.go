@@ -129,7 +129,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&slowFlag, "slow", false,
 		"Slow mode: 1 thread, 3 passes with delay between operations")
 	rootCmd.PersistentFlags().IntVar(&delayMs, "delay", 10,
-		"Delay in milliseconds between operations in slow mode (default: 10)")
+		"Delay in milliseconds between page rounds in slow mode")
 	rootCmd.PersistentFlags().BoolVar(&dryRunFlag, "dry-run", false,
 		"Show what would be done without making changes")
 	rootCmd.PersistentFlags().BoolVar(&reindexFlag, "reindex", false,

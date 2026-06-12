@@ -412,6 +412,12 @@ func (db *DB) CompactTableUpdate(tableName string) error {
 					currentPage, currentPages)
 			}
 		}
+
+		// Throttle between page rounds (--slow mode): gives the server room
+		// to breathe and keeps replication lag under control.
+		if db.DelayMs > 0 {
+			time.Sleep(time.Duration(db.DelayMs) * time.Millisecond)
+		}
 	}
 
 	// Clear progress line
