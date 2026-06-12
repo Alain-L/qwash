@@ -826,6 +826,29 @@ func TestCLIErrorJobsWithoutDebloat(t *testing.T) {
 	}
 }
 
+// TestCLIErrorDebloatWithToast tests that --debloat rejects --toast and --btree
+// (only heap debloat is implemented; silently debloating the heap instead
+// would be misleading)
+func TestCLIErrorDebloatWithToast(t *testing.T) {
+	conn := setupTestDB(t)
+	createBloatedTable(t, conn, "toast_error_table", 1000, 50)
+	conn.Close()
+
+	for _, flag := range []string{"--toast", "--btree"} {
+		output, err := runQwashCLI(t, "--debloat", flag, "-t", "toast_error_table")
+
+		// Should fail
+		if err == nil {
+			t.Errorf("Expected error when using %s with --debloat, but got success\nOutput: %s", flag, output)
+		}
+
+		// Should mention the unsupported combination
+		if !strings.Contains(strings.ToLower(output), "not supported") {
+			t.Logf("Warning: Error message doesn't clearly mention the unsupported combination\nOutput: %s", output)
+		}
+	}
+}
+
 // TestCLIErrorDebloatWithoutTable tests behavior when no table specified for debloat
 func TestCLIErrorDebloatWithoutTable(t *testing.T) {
 	conn := setupTestDB(t)

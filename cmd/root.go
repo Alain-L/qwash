@@ -169,6 +169,12 @@ func executeAnalysis(cmd *cobra.Command, args []string) {
 		fatal("--estimate (-E) and --debloat (-B) cannot be used together")
 	}
 
+	// --toast and --btree are analysis-only: only heap debloat is implemented.
+	// Without this guard, --debloat --toast would silently debloat the heap.
+	if debloatFlag && (toastFlag || btreeFlag) {
+		fatal("--toast and --btree are not supported with --debloat (-B); only heap debloat is implemented")
+	}
+
 	// --reindex requires --debloat
 	if reindexFlag && !debloatFlag {
 		fatal("--reindex requires --debloat (-B)")
