@@ -116,7 +116,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVarP(&detailFlag, "detail", "D", false,
 		"Show detailed bloat analysis per table and index")
 	rootCmd.PersistentFlags().BoolVar(&heapFlag, "heap", false,
-		"Analyze heap bloat (default if neither --heap nor --toast specified)")
+		"Analyze heap bloat (default if no --heap, --toast or --btree specified)")
 	rootCmd.PersistentFlags().BoolVar(&toastFlag, "toast", false,
 		"Analyze TOAST bloat")
 	rootCmd.PersistentFlags().BoolVar(&btreeFlag, "btree", false,
@@ -140,7 +140,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&limitStr, "limit", "",
 		"Stop after reducing X bloat (e.g., 500MB, 1GB, 50%)")
 	rootCmd.PersistentFlags().IntVarP(&jobsFlag, "jobs", "j", 0,
-		"Number of parallel workers (default: 4, or 8 with --fast)")
+		"Number of parallel workers (default: 2, 4 with --fast, 1 with --slow)")
 
 	// Output options
 	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false,

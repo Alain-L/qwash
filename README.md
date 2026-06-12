@@ -1,6 +1,6 @@
 # qwash
 
-**qwash** is a PostgreSQL bloat analysis and reduction tool. It identifies and reduces table bloat **without blocking writes** (unlike `VACUUM FULL`), making it safe for production use.
+**qwash** is a PostgreSQL bloat analysis and reduction tool. It identifies and reduces table bloat **using regular DML operations** instead of a long exclusive lock (unlike `VACUUM FULL`), making it suitable for production use (see [Operational Caveats](#operational-caveats)).
 
 qwash is a **standalone tool** that combines bloat estimation and reduction in a single binary:
 - **No extensions required** — works with any PostgreSQL 9.6+ installation
@@ -10,8 +10,8 @@ qwash is a **standalone tool** that combines bloat estimation and reduction in a
 ## Features
 
 - **Bloat Estimation** — Analyze table, TOAST and B-Tree index bloat using PostgreSQL system catalogs (no `pgstattuple`)
-- **Non-blocking Reduction** — Reclaim space incrementally without exclusive locks
-- **Trigger & FK Safe** — uses `session_replication_role = replica` (own session only)
+- **Non-blocking Reduction** — Reclaim space incrementally; writes keep flowing during compaction
+- **Trigger & FK Safe** — regular triggers and FK checks are suspended via `session_replication_role = replica` (own session only; `ENABLE ALWAYS`/`ENABLE REPLICA` triggers are the exception, see [Operational Caveats](#operational-caveats))
 - **Multiple Modes** — Default (2 workers), fast (4 workers), or slow (1 worker with delay)
 - **Dry-run Support** — Preview changes before applying them
 - **JSON Output** — Machine-readable output for automation and monitoring
@@ -64,6 +64,8 @@ go build -o bin/qwash
 ### Requirements
 
 - PostgreSQL 9.6+
+- For `--debloat`: a superuser role (PostgreSQL < 15) or a role granted `SET` on `session_replication_role` (PostgreSQL 15+), which must also **own the target tables** so that `VACUUM` can reclaim the freed pages
+- For `--debloat`: a direct connection (no transaction-pooling pgbouncer; qwash relies on session state)
 
 ## Quick Start
 
@@ -95,11 +97,14 @@ go build -o bin/qwash
 ### Reduce Bloat
 
 ```sh
-# Debloat specific tables (required: -t flag)
+# Debloat specific tables (-t required, or use --all)
 ./bin/qwash --debloat -d mydb -t bloated_table
 
 # Debloat multiple tables
 ./bin/qwash --debloat -d mydb -t table1 -t table2 -t table3
+
+# Debloat every table in the database (explicit opt-in)
+./bin/qwash --debloat -d mydb --all
 
 # Fast mode (4 workers, 1 pass, ~97% efficiency)
 ./bin/qwash --debloat -d mydb -t mytable --fast
@@ -136,7 +141,7 @@ Analysis:
       --heap              Analyze heap (table) bloat (default if no target specified)
       --toast             Analyze TOAST bloat
       --btree             Analyze B-Tree index bloat
-  -D, --detail            Show detailed analysis per table and index
+  -D, --detail            Show detailed analysis per table and index (not yet implemented; use -t for a per-table view)
   -t, --table strings     Target specific table(s)
   -n, --schema strings    Target specific schema(s)
   -X, --exclude-table     Exclude specific tables
@@ -144,9 +149,11 @@ Analysis:
 
 Debloat:
   -B, --debloat           Perform bloat reduction
+      --all               Debloat every table (required when -t is not given)
       --fast              Fast mode: 4 workers, 1 pass (~97% efficiency)
       --slow              Slow mode: 1 worker, 3 passes, with delay between pages
       --delay int         Delay in ms between pages in slow mode (default: 10)
+  -j, --jobs int          Parallel workers (default: 2, 4 with --fast, 1 with --slow)
       --dry-run           Preview changes without applying them
       --reindex           Rebuild indexes after debloat (REINDEX CONCURRENTLY)
       --limit string      Stop after reducing X bloat (e.g., 500MB, 1GB, 50%)
@@ -185,7 +192,7 @@ qwash uses the [ioguix bloat estimation approach](https://github.com/ioguix/pgsq
 
 The difference is the estimated bloat.
 
-**TOAST bloat** (`--toast`) uses a similar approach: it compares actual TOAST pages with the theoretical minimum based on live chunk count and average chunk size derived from `pg_column_size()` (no detoasting). Estimation is reliable for TOAST tables >= 10 MB and requires recent `VACUUM` for accurate stats. A [standalone query](sql/toast_bloat.sql) is available for DBA use without installing qwash.
+**TOAST bloat** (`--toast`) uses a similar approach: it compares actual TOAST pages with the theoretical minimum based on live chunk count and average chunk size measured directly on the TOAST chunks (no detoasting). Estimation is reliable for TOAST tables >= 10 MB and requires recent `VACUUM` for accurate stats. A [standalone query](sql/toast_bloat.sql) is available for DBA use without installing qwash.
 
 **B-Tree index bloat** (`--btree`) follows the same ioguix methodology adapted for indexes: it derives the theoretical minimum number of pages from `pg_stats` (`avg_width`, `null_frac`) and B-Tree page overhead (page header, opaque, item pointers, tuple header, MAXALIGN padding) and compares it to the actual `relpages` count. Indexes whose key columns include a `name`-typed column are flagged as **unreliable** (`is_na = true`) because `pg_stats` returns inaccurate widths for that type. A [standalone query](sql/btree_bloat.sql) is also available for DBA use.
 
@@ -199,11 +206,22 @@ The debloat algorithm is inspired by [pgcompacttable](https://github.com/dataegr
 4. Repeat until bloat is minimized
 
 This approach:
-- **Never blocks writes** — uses regular DML operations
-- **Is transaction-safe** — can be interrupted safely
+- **Lets writes keep flowing** — compaction uses regular `UPDATE`s (row-level locking only); the only exclusive lock is the brief one `VACUUM` takes to truncate empty pages at the end of the file
+- **Is transaction-safe** — one page per transaction; interrupting qwash only loses the page in progress
 - **Works incrementally** — progress is preserved between runs
 - **Preserves row identity** — no DELETE/INSERT, sequences and references unchanged
-- **Trigger & FK safe** — uses `session_replication_role = replica` on its own session only; other sessions are unaffected
+- **Trigger & FK safe** — uses `session_replication_role = replica` on its own session only; other sessions are unaffected (see caveats below for the exceptions)
+
+### Operational Caveats
+
+Things to know before running `--debloat` on a busy production database:
+
+- **Privileges** — requires superuser (PostgreSQL < 15) or `SET session_replication_role` privilege (15+), and **ownership of the target tables**: PostgreSQL silently skips `VACUUM` on tables you don't own, in which case moved rows are never reclaimed.
+- **Locks** — `UPDATE`s take row-level locks on the rows being moved (concurrent application updates on those rows wait for the page transaction, which is short). `VACUUM`'s end-of-table truncation takes a **brief exclusive lock** and can cause recovery conflicts on hot standbys.
+- **Triggers** — regular triggers don't fire, but `ENABLE ALWAYS` triggers (e.g. audit or `moddatetime` triggers) **still fire** on every moved row, and `ENABLE REPLICA` triggers **start firing**. Review trigger definitions before debloating such tables.
+- **WAL and logical replication** — every moved row is written to WAL (volume ≈ data moved) and **decoded by logical replication**: expect subscriber traffic and lag proportional to the bloat being removed. Tables in a publication without a `REPLICA IDENTITY` will fail to update.
+- **Connection pooling** — connect **directly** to PostgreSQL. Through a transaction-pooling pgbouncer, the session-level protections (`session_replication_role`, `lock_timeout`, advisory locks) may land on different backends and silently stop working.
+- **Statistics matter** — the bloat estimation is based on `pg_stats`/`pg_class`; run `ANALYZE` (and ideally `VACUUM`) on the target tables first if their statistics are stale.
 
 ### Debloat Modes
 
