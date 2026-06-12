@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"qwash/analysis"
@@ -300,14 +302,18 @@ func executeAnalysis(cmd *cobra.Command, args []string) {
 	}
 	defer connection.Close()
 
+	// Cancel long operations cleanly on Ctrl-C / SIGTERM.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	// Step 4: Determine operation mode
 	switch {
 	case estimateFlag:
-		runEstimate(connection)
+		runEstimate(ctx, connection)
 		return
 
 	case debloatFlag:
-		runDebloat(connection)
+		runDebloat(ctx, connection)
 		return
 
 	case detailFlag:
@@ -345,7 +351,7 @@ func promptPassword() string {
 }
 
 // runEstimate executes the bloat estimation report
-func runEstimate(connection *db.DB) {
+func runEstimate(ctx context.Context, connection *db.DB) {
 	if verboseFlag {
 		fmt.Println("Running bloat estimation...")
 		if len(targetSchemas) > 0 {
@@ -372,7 +378,7 @@ func runEstimate(connection *db.DB) {
 	var tableBloat []analysis.BloatTable
 	var err error
 	if heapFlag {
-		tableBloat, err = analysis.DetectTableBloat(context.Background(), connection)
+		tableBloat, err = analysis.DetectTableBloat(ctx, connection)
 		if err != nil {
 			fatal("failed to analyze table bloat", "error", err)
 		}
@@ -381,7 +387,7 @@ func runEstimate(connection *db.DB) {
 	// Analyze TOAST bloat if --toast is enabled
 	var toastBloat []analysis.ToastBloat
 	if toastFlag {
-		toastBloat, err = analysis.DetectToastBloat(context.Background(), connection)
+		toastBloat, err = analysis.DetectToastBloat(ctx, connection)
 		if err != nil {
 			slog.Warn("failed to analyze TOAST bloat", "error", err)
 			// Continue without TOAST data
@@ -391,7 +397,7 @@ func runEstimate(connection *db.DB) {
 	// Analyze B-Tree index bloat if --btree is enabled
 	var indexBloat []analysis.BloatIndex
 	if btreeFlag {
-		indexBloat, err = analysis.DetectBtreeIndexBloat(context.Background(), connection)
+		indexBloat, err = analysis.DetectBtreeIndexBloat(ctx, connection)
 		if err != nil {
 			slog.Warn("failed to analyze B-Tree index bloat", "error", err)
 			// Continue without index data
@@ -532,7 +538,7 @@ func filterIndexByTable(indexes []analysis.BloatIndex, targetNames []string) []a
 }
 
 // runDebloat executes the bloat reduction process
-func runDebloat(connection *db.DB) {
+func runDebloat(ctx context.Context, connection *db.DB) {
 	// Warning for system tables
 	if systemFlag {
 		fmt.Println("WARNING: You are about to debloat system tables!")
@@ -661,10 +667,10 @@ func runDebloat(connection *db.DB) {
 
 	if numWorkers == 1 {
 		// Sequential mode (original behavior)
-		results, limitReached = runDebloatSequential(connection, tables, tableBloatPages, limitBytes)
+		results, limitReached = runDebloatSequential(ctx, connection, tables, tableBloatPages, limitBytes)
 	} else {
 		// Parallel mode
-		results, limitReached = runDebloatParallel(connection, tables, tableBloatPages, numWorkers, limitBytes)
+		results, limitReached = runDebloatParallel(ctx, connection, tables, tableBloatPages, numWorkers, limitBytes)
 	}
 
 	totalDuration := time.Since(startTime)
@@ -696,7 +702,7 @@ func runDebloat(connection *db.DB) {
 }
 
 // runDebloatSequential processes tables one at a time (original behavior)
-func runDebloatSequential(connection *db.DB, tables []string, bloatByTable map[string]int, limitBytes int64) ([]analysis.DebloatResult, bool) {
+func runDebloatSequential(ctx context.Context, connection *db.DB, tables []string, bloatByTable map[string]int, limitBytes int64) ([]analysis.DebloatResult, bool) {
 	var results []analysis.DebloatResult
 	var totalBloatRemoved int64
 	limitReached := false
@@ -707,6 +713,12 @@ func runDebloatSequential(connection *db.DB, tables []string, bloatByTable map[s
 	connection.SilentProgress = jsonFlag || (!verboseFlag && !dryRunFlag)
 
 	for i, table := range tables {
+		// Stop launching new work on Ctrl-C; tables already done are kept.
+		if ctx.Err() != nil {
+			slog.Warn("interrupted; stopping before remaining tables", "processed", i, "total", len(tables))
+			break
+		}
+
 		// Check if limit is reached
 		if limitBytes > 0 && totalBloatRemoved >= limitBytes {
 			if verboseFlag {
@@ -722,7 +734,7 @@ func runDebloatSequential(connection *db.DB, tables []string, bloatByTable map[s
 		}
 
 		connection.CurrentTableIndex = i
-		result := processTable(connection, table, bloatByTable[table])
+		result := processTable(ctx, connection, table, bloatByTable[table])
 		results = append(results, result)
 
 		if result.BloatRemoved > 0 {
@@ -739,7 +751,7 @@ func runDebloatSequential(connection *db.DB, tables []string, bloatByTable map[s
 }
 
 // runDebloatParallel processes tables concurrently using a worker pool
-func runDebloatParallel(connection *db.DB, tables []string, bloatByTable map[string]int, numWorkers int, limitBytes int64) ([]analysis.DebloatResult, bool) {
+func runDebloatParallel(ctx context.Context, connection *db.DB, tables []string, bloatByTable map[string]int, numWorkers int, limitBytes int64) ([]analysis.DebloatResult, bool) {
 	// Channels for work distribution and results
 	tableChan := make(chan string, len(tables))
 	resultChan := make(chan analysis.DebloatResult, len(tables))
@@ -789,6 +801,12 @@ func runDebloatParallel(connection *db.DB, tables []string, bloatByTable map[str
 		go func(w *db.DB) {
 			defer wg.Done()
 			for table := range tableChan {
+				// Stop processing new tables on Ctrl-C; drain the channel
+				// without working so the dispatcher's sends don't block.
+				if ctx.Err() != nil {
+					continue
+				}
+
 				// Check if limit reached before processing
 				if limitBytes > 0 && atomic.LoadInt64(&totalBloatRemoved) >= limitBytes {
 					atomic.StoreInt64(&limitReached, 1)
@@ -800,7 +818,7 @@ func runDebloatParallel(connection *db.DB, tables []string, bloatByTable map[str
 					continue
 				}
 
-				result := processTable(w, table, bloatByTable[table])
+				result := processTable(ctx, w, table, bloatByTable[table])
 				resultChan <- result
 
 				// Update counters
@@ -821,6 +839,10 @@ func runDebloatParallel(connection *db.DB, tables []string, bloatByTable map[str
 	// Wait for all workers to finish
 	wg.Wait()
 	close(resultChan)
+
+	if ctx.Err() != nil {
+		slog.Warn("interrupted; stopped processing remaining tables")
+	}
 
 	// Stop progress display
 	close(stopProgress)
@@ -892,7 +914,7 @@ func getTargetTables(connection *db.DB) ([]string, error) {
 // processTable debloats a single table and returns the result.
 // bloatPages is the estimated bloat (in pages) precomputed once for the whole
 // database, so this function does not re-run the catalog-wide bloat query.
-func processTable(connection *db.DB, table string, bloatPages int) analysis.DebloatResult {
+func processTable(ctx context.Context, connection *db.DB, table string, bloatPages int) analysis.DebloatResult {
 	startTime := time.Now()
 	result := analysis.DebloatResult{Table: table, DryRun: dryRunFlag}
 
@@ -963,7 +985,7 @@ func processTable(connection *db.DB, table string, bloatPages int) analysis.Debl
 		passes = 3 // slow: 3 passes for thorough compaction
 	}
 	for pass := 1; pass <= passes; pass++ {
-		compactErr = connection.CompactTableToTarget(table, toPage)
+		compactErr = connection.CompactTableToTarget(ctx, table, toPage)
 		if compactErr != nil {
 			break
 		}

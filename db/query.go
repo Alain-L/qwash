@@ -319,19 +319,22 @@ func (db *DB) CompactTableUpdate(tableName string) error {
 	if err != nil {
 		return err
 	}
-	return db.compactToTarget(resolved, toPage)
+	return db.compactToTarget(context.Background(), resolved, toPage)
 }
 
 // CompactTableToTarget compacts an already-targeted table down to toPage,
 // skipping the internal bloat estimation. The orchestrator uses this with a
 // target precomputed once from GetAllBloatPages, instead of re-running the
 // full-catalog bloat query for every table (and every compaction pass).
-func (db *DB) CompactTableToTarget(tableName string, toPage int) error {
+//
+// The context cancels the compaction between page rounds (and aborts the
+// in-flight statement), so an interrupted run stops promptly and cleanly.
+func (db *DB) CompactTableToTarget(ctx context.Context, tableName string, toPage int) error {
 	resolved, err := db.ResolveTableName(tableName)
 	if err != nil {
 		return err
 	}
-	return db.compactToTarget(resolved, toPage)
+	return db.compactToTarget(ctx, resolved, toPage)
 }
 
 // estimateTargetPages returns the target page count (actual pages minus
@@ -353,9 +356,9 @@ func (db *DB) estimateTargetPages(tableName string) (int, error) {
 }
 
 // compactToTarget runs the UPDATE-based compaction on an already-resolved
-// table down to the given target page count.
-func (db *DB) compactToTarget(tableName string, toPage int) error {
-	ctx := context.Background()
+// table down to the given target page count. The context cancels the loop
+// between page rounds and aborts the in-flight statement.
+func (db *DB) compactToTarget(ctx context.Context, tableName string, toPage int) error {
 	if toPage < 0 {
 		toPage = 0
 	}
@@ -460,6 +463,12 @@ func (db *DB) compactToTarget(tableName string, toPage int) error {
 	currentPage := initialPages - 1 // Start from last page (0-indexed)
 
 	for currentPage > toPage {
+		// Stop promptly on cancellation (Ctrl-C): the page just processed is
+		// already committed, so the table stays consistent.
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("compaction of '%s' interrupted at page %d: %w", tableName, currentPage, err)
+		}
+
 		// Call procedure to process current page
 		var resultPage int
 		err = db.QueryRow(ctx,

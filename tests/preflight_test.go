@@ -58,7 +58,7 @@ func TestPreflightNonOwnerRefused(t *testing.T) {
 	}
 
 	// And the actual compaction must fail too, not silently proceed.
-	if err := limited.CompactTableToTarget("public.owned_by_admin", 0); err == nil {
+	if err := limited.CompactTableToTarget(context.Background(), "public.owned_by_admin", 0); err == nil {
 		// CompactTableToTarget itself may fail earlier (e.g. on SET
 		// session_replication_role); either way it must not succeed.
 		t.Log("note: compaction failed before preflight wiring, which is also acceptable")
@@ -110,6 +110,38 @@ func TestPreflightAlwaysTriggerWarns(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("Expected an ALWAYS/REPLICA trigger warning, got: %v", warnings)
+	}
+}
+
+// TestCompactionCancellation verifies that a cancelled context stops the
+// compaction promptly instead of running to completion (Ctrl-C support).
+func TestCompactionCancellation(t *testing.T) {
+	conn := setupTestDB(t)
+	defer conn.Close()
+
+	// A sizeable bloated table so compaction would take many page rounds.
+	createBloatedTable(t, conn, "cancel_tbl", 20000, 50)
+	initialPages := getTablePages(t, conn, "cancel_tbl")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled before we start
+
+	err := conn.CompactTableToTarget(ctx, "cancel_tbl", 0)
+	if err == nil {
+		t.Fatal("Expected compaction to stop on a cancelled context, got nil")
+	}
+	if !strings.Contains(err.Error(), "interrupt") && !strings.Contains(err.Error(), "context canceled") {
+		t.Errorf("Expected an interruption error, got: %v", err)
+	}
+
+	// The table must not have been fully compacted (it stopped early).
+	conn2, e := db.Connect(getTestConfig(), false)
+	if e != nil {
+		t.Fatalf("reconnect failed: %v", e)
+	}
+	defer conn2.Close()
+	if final := getTablePages(t, conn2, "cancel_tbl"); final < initialPages/2 {
+		t.Errorf("Compaction should have stopped early, but table shrank from %d to %d pages", initialPages, final)
 	}
 }
 
