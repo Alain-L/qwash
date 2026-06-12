@@ -83,7 +83,10 @@ index_stats AS (
          ELSE c.index_tuple_hdr + ((32 + 8 - 1) / 8)
     END AS index_tuple_hdr_bm,
     SUM((1 - COALESCE(s.null_frac, 0)) * COALESCE(s.avg_width, 1024)) AS data_width,
-    MAX(CASE WHEN ia.atttypid = 'pg_catalog.name'::regtype THEN 1
+    -- Unreliable when a key column is of type "name" (bad pg_stats widths) or
+    -- has no statistics at all (LEFT JOIN miss). The latter used to be an INNER
+    -- JOIN, which silently dropped such indexes from the report entirely.
+    MAX(CASE WHEN ia.atttypid = 'pg_catalog.name'::regtype OR s.attname IS NULL THEN 1
              ELSE 0 END) > 0 AS is_na,
     c.block_size,
     c.maxalign,
@@ -92,7 +95,7 @@ index_stats AS (
     c.item_pointer
   FROM index_attrs ia
   JOIN pg_namespace n ON n.oid = ia.relnamespace
-  JOIN pg_stats s
+  LEFT JOIN pg_stats s
     ON s.schemaname = n.nspname
     AND s.tablename = ia.stats_relname
     AND s.attname = ia.attname

@@ -323,7 +323,8 @@ func PrintIndexBloatSummary(indexes []analysis.BloatIndex) {
 			)
 		}
 		fmt.Println()
-		fmt.Println("  Columns of type \"name\" produce unreliable pg_stats estimates.")
+		fmt.Println("  Flagged when a key column is of type \"name\" or has no column")
+		fmt.Println("  statistics — run ANALYZE on the table for a reliable estimate.")
 		fmt.Println()
 	}
 }
@@ -381,7 +382,7 @@ func PrintDetailedIndexBloat(indexes []analysis.BloatIndex) {
 		fmt.Printf("  Bloat pages : %d\n", idx.BloatPages)
 		fmt.Printf("  Fill factor : %d\n", idx.FillFactor)
 		if idx.IsNA {
-			fmt.Printf("  Warning     : unreliable estimate (name column type)\n")
+			fmt.Printf("  Warning     : unreliable estimate (name column type or missing statistics)\n")
 		}
 		fmt.Println()
 
