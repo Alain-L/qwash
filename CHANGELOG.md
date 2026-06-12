@@ -5,6 +5,9 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **Preflight safety checks before compaction**: a table is now refused (and the run continues with the others) when the current role can neither own nor superuser-VACUUM it — previously the UPDATEs ran but VACUUM silently reclaimed nothing, *increasing* bloat — or when it is in a logical-replication publication without a usable REPLICA IDENTITY (the UPDATEs would fail). `ENABLE ALWAYS`/`REPLICA` triggers and publication membership are surfaced as warnings.
+- **Clean cancellation on Ctrl-C (SIGINT/SIGTERM)**: long debloat/estimate runs stop promptly between tables and between page rounds instead of being killed mid-statement; each page is its own transaction, so the table stays consistent.
+- **`--reindex` never silently blocks**: it no longer falls back to a blocking `REINDEX TABLE` when `REINDEX CONCURRENTLY` fails (or on PostgreSQL < 12); it refuses or reports the failure, and cleans up the transient invalid `*_ccnew`/`*_ccold` indexes left behind.
 - **Exact byte sizes**: the table report and JSON no longer round-trip sizes through `pg_size_pretty` and back, which drifted by up to half the displayed unit per table; sizes are now exact to the byte
 - **Bloat query runs once per debloat**: the catalog-wide estimation used to run once per table and again per compaction pass (≈3N+ scans, quadratic on large databases); it now runs a single time and results are looked up from a map
 - **`--slow --delay` now actually throttles**: the delay was silently ignored, so slow mode ran at full speed while promising minimal production impact
@@ -30,6 +33,7 @@ All notable changes to this project will be documented in this file.
 - `--exclude-table` accepts schema-qualified names (`-X staging.orders`)
 
 ### Added
+- **Exit codes** for automation: `0` success, `1` fatal error, `2` completed with per-table failures
 - `--all` flag to explicitly debloat every table in the database
 - First unit tests (`db` package: DSN building and quoting) and new integration regression tests (delay throttling, `PG*` environment support, `--all` behavior)
 - CI now also runs on pushes to `dev` and `hardening`

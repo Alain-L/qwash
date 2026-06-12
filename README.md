@@ -219,14 +219,22 @@ This approach:
 
 ### Operational Caveats
 
-Things to know before running `--debloat` on a busy production database:
+qwash runs a preflight check on each table before compacting it: it **refuses**
+a table whose pages it could not reclaim (the current role is neither the owner
+nor a superuser) or whose `UPDATE`s would fail (in a publication without a
+usable `REPLICA IDENTITY`), and **warns** about `ENABLE ALWAYS`/`REPLICA`
+triggers and publication membership. The rest of the points below still
+warrant attention:
 
-- **Privileges** — requires superuser (PostgreSQL < 15) or `SET session_replication_role` privilege (15+), and **ownership of the target tables**: PostgreSQL silently skips `VACUUM` on tables you don't own, in which case moved rows are never reclaimed.
+- **Privileges** — requires superuser (PostgreSQL < 15) or `SET session_replication_role` privilege (15+), and **ownership of the target tables**: PostgreSQL silently skips `VACUUM` on tables you don't own, in which case moved rows are never reclaimed (qwash now refuses this case up front).
 - **Locks** — `UPDATE`s take row-level locks on the rows being moved (concurrent application updates on those rows wait for the page transaction, which is short). `VACUUM`'s end-of-table truncation takes a **brief exclusive lock** and can cause recovery conflicts on hot standbys.
-- **Triggers** — regular triggers don't fire, but `ENABLE ALWAYS` triggers (e.g. audit or `moddatetime` triggers) **still fire** on every moved row, and `ENABLE REPLICA` triggers **start firing**. Review trigger definitions before debloating such tables.
-- **WAL and logical replication** — every moved row is written to WAL (volume ≈ data moved) and **decoded by logical replication**: expect subscriber traffic and lag proportional to the bloat being removed. Tables in a publication without a `REPLICA IDENTITY` will fail to update.
+- **Triggers** — regular triggers don't fire, but `ENABLE ALWAYS` triggers (e.g. audit or `moddatetime` triggers) **still fire** on every moved row, and `ENABLE REPLICA` triggers **start firing** (qwash warns when such triggers exist). Review trigger definitions before debloating such tables.
+- **WAL and logical replication** — every moved row is written to WAL (volume ≈ data moved) and **decoded by logical replication**: expect subscriber traffic and lag proportional to the bloat being removed (qwash warns when the table is published).
 - **Connection pooling** — connect **directly** to PostgreSQL. Through a transaction-pooling pgbouncer, the session-level protections (`session_replication_role`, `lock_timeout`, advisory locks) may land on different backends and silently stop working.
 - **Statistics matter** — the bloat estimation is based on `pg_stats`/`pg_class`; run `ANALYZE` (and ideally `VACUUM`) on the target tables first if their statistics are stale.
+- **Interruptions** — `Ctrl-C` stops cleanly between pages: the page in progress rolls back, already-compacted pages stay. `--reindex` uses `REINDEX CONCURRENTLY` only (PostgreSQL 12+) and never falls back to a blocking `REINDEX`.
+
+**Exit codes** (for automation): `0` success · `1` fatal error (bad flags, connection failure, unknown `-t` table) · `2` completed with per-table failures.
 
 ### Debloat Modes
 
