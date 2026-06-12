@@ -150,7 +150,7 @@ Analysis:
   -t, --table strings     Target specific table(s)
   -n, --schema strings    Target specific schema(s)
   -X, --exclude-table     Exclude specific tables
-  -S, --system            Include system tables (pg_catalog, information_schema)
+  -S, --system            Include system catalog tables (pg_catalog) in the estimate
 
 Debloat:
   -B, --debloat           Perform bloat reduction

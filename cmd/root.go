@@ -404,6 +404,22 @@ func runEstimate(ctx context.Context, connection *db.DB) {
 		}
 	}
 
+	// Hide system-schema objects unless --system is given. The embedded
+	// queries now return system catalogs too (so --system can surface them),
+	// and this is the single authoritative place that filters them out.
+	if !systemFlag {
+		isSystem := func(schema string) bool {
+			switch schema {
+			case "pg_catalog", "information_schema", "pg_toast":
+				return true
+			}
+			return false
+		}
+		tableBloat = keepIf(tableBloat, func(t analysis.BloatTable) bool { return !isSystem(t.Schema) })
+		toastBloat = keepIf(toastBloat, func(t analysis.ToastBloat) bool { return !isSystem(t.Schema) })
+		indexBloat = keepIf(indexBloat, func(i analysis.BloatIndex) bool { return !isSystem(i.Schema) })
+	}
+
 	// Apply --schema and --exclude-table filters. These used to be silently
 	// ignored in estimate mode (only --debloat honored them), so a report
 	// could include tables the user believed were filtered out.

@@ -175,7 +175,7 @@ SELECT
 FROM bloat_estimation be
 JOIN pg_class ct ON ct.oid = be.indrelid
 JOIN pg_namespace n ON n.oid = be.relnamespace
-WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+-- System schemas are kept here and filtered by the application (see --system).
 ORDER BY bloat_pct DESC NULLS LAST, (be.relpages * be.block_size) DESC
 `
 

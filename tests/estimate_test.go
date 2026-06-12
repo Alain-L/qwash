@@ -81,6 +81,47 @@ func TestEstimateStaleStatsSurfaced(t *testing.T) {
 	}
 }
 
+// TestEstimateSystemFlag verifies that system catalog tables are excluded by
+// default but included with --system (the flag used to be silently ignored in
+// estimate mode).
+func TestEstimateSystemFlag(t *testing.T) {
+	conn := setupTestDB(t)
+	createBloatedTable(t, conn, "sysflag_user", 2000, 50)
+	conn.Close()
+
+	countCatalog := func(out string) int {
+		var r EstimateJSON
+		if err := json.Unmarshal([]byte(out), &r); err != nil {
+			t.Fatalf("Failed to parse JSON: %v\nOutput: %s", err, out)
+		}
+		n := 0
+		for _, tbl := range r.Tables {
+			if tbl.Schema == "pg_catalog" {
+				n++
+			}
+		}
+		return n
+	}
+
+	// Default: no system tables.
+	def, err := runQwashCLI(t, "--estimate", "--json")
+	if err != nil {
+		t.Fatalf("CLI failed: %v\nOutput: %s", err, def)
+	}
+	if c := countCatalog(def); c != 0 {
+		t.Errorf("Default --estimate should exclude pg_catalog tables, found %d", c)
+	}
+
+	// --system: catalog tables appear.
+	sys, err := runQwashCLI(t, "--estimate", "--system", "--json")
+	if err != nil {
+		t.Fatalf("CLI failed: %v\nOutput: %s", err, sys)
+	}
+	if c := countCatalog(sys); c == 0 {
+		t.Errorf("--estimate --system should include pg_catalog tables, found none")
+	}
+}
+
 // TestEstimateBasic tests basic --estimate output (text mode)
 func TestEstimateBasic(t *testing.T) {
 	conn := setupTestDB(t)

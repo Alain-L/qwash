@@ -47,7 +47,10 @@ table_stats AS (
   FROM pg_attribute att
   JOIN pg_class tbl ON att.attrelid = tbl.oid
   JOIN pg_namespace ns ON ns.oid = tbl.relnamespace
-  JOIN pg_stat_user_tables psut ON psut.relid = tbl.oid
+  -- pg_stat_all_tables (not _user_) so system catalogs are covered too; the
+  -- application decides whether to show them (see --system). Stats for a user
+  -- table are identical in both views.
+  JOIN pg_stat_all_tables psut ON psut.relid = tbl.oid
   CROSS JOIN constants c
   LEFT JOIN pg_stats s
     ON s.schemaname = ns.nspname
@@ -56,7 +59,6 @@ table_stats AS (
     AND s.attname = att.attname
   WHERE NOT att.attisdropped
     AND tbl.relkind IN ('r', 'm')  -- Regular tables and materialized views
-    AND ns.nspname NOT IN ('pg_catalog', 'information_schema')
   GROUP BY
     ns.nspname, tbl.relname, tbl.oid, tbl.reltuples, tbl.relpages,
     tbl.reloptions, tbl.reltoastrelid, psut.n_live_tup, psut.n_dead_tup,
