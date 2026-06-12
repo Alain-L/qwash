@@ -128,6 +128,47 @@ func (db *DB) Exec(ctx context.Context, query string, args ...interface{}) (pgco
 	return db.conn.Exec(ctx, query, args...)
 }
 
+// ResolveTableName resolves a possibly-unqualified table name to its
+// canonical "schema.table" form. Unqualified names are resolved through the
+// session search_path — the same rule the compaction DML follows — so the
+// bloat estimation, the advisory lock and the UPDATEs all target the same
+// relation even when homonym tables exist in several schemas.
+func (db *DB) ResolveTableName(tableName string) (string, error) {
+	ctx := context.Background()
+
+	var schemaName, relName string
+	var err error
+	if strings.Contains(tableName, ".") {
+		parts := strings.SplitN(tableName, ".", 2)
+		err = db.QueryRow(ctx, `
+			SELECT n.nspname, c.relname
+			FROM pg_class c
+			JOIN pg_namespace n ON n.oid = c.relnamespace
+			WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind = 'r'
+		`, parts[0], parts[1]).Scan(&schemaName, &relName)
+	} else {
+		// Mimic search_path resolution for a bare name: first match in
+		// current_schemas() order wins, exactly like the DML will resolve it.
+		err = db.QueryRow(ctx, `
+			SELECT n.nspname, c.relname
+			FROM pg_class c
+			JOIN pg_namespace n ON n.oid = c.relnamespace
+			WHERE c.relname = $1 AND c.relkind = 'r'
+			  AND n.nspname = ANY(current_schemas(false))
+			ORDER BY array_position(current_schemas(false), n.nspname)
+			LIMIT 1
+		`, tableName).Scan(&schemaName, &relName)
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", fmt.Errorf("table '%s' does not exist (or is not a regular table)", tableName)
+	}
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve table '%s': %w", tableName, err)
+	}
+
+	return schemaName + "." + relName, nil
+}
+
 // sanitizeTableName properly quotes a table name that may include a schema prefix.
 // E.g., "public.mytable" -> "public"."mytable", "mytable" -> "mytable"
 func sanitizeTableName(tableName string) string {
@@ -271,6 +312,15 @@ func (db *DB) getUpdatableColumn(tableName string) (string, error) {
 // This approach is efficient and may require 1-2 passes for complete compaction.
 func (db *DB) CompactTableUpdate(tableName string) error {
 	ctx := context.Background()
+
+	// Resolve to a canonical "schema.table" name first, so that the bloat
+	// estimation, the advisory lock and the DML below all designate the same
+	// relation (an unqualified name could otherwise match homonym tables in
+	// different schemas depending on the consumer).
+	tableName, err := db.ResolveTableName(tableName)
+	if err != nil {
+		return err
+	}
 
 	// Safety check: verify no conflicting locks on table
 	if err := db.checkTableLocks(tableName); err != nil {
@@ -527,50 +577,45 @@ func (db *DB) GetBloatPages(tableName string) (int, error) {
 }
 
 // ListTablesFiltered returns tables filtered by schemas, system flag, and exclusion list.
+// Returned names are schema-qualified ("schema.table"). Exclusions match
+// either the bare table name or its qualified form. All user-provided values
+// are passed as query parameters, never interpolated.
 func (db *DB) ListTablesFiltered(schemas []string, includeSystem bool, excludeTables []string) ([]string, error) {
 	ctx := context.Background()
 
 	// Build WHERE conditions
 	var conditions []string
+	var args []any
 
 	// Filter by schemas if specified
 	if len(schemas) > 0 {
-		placeholders := make([]string, len(schemas))
-		for i := range schemas {
-			placeholders[i] = fmt.Sprintf("'%s'", schemas[i])
-		}
-		conditions = append(conditions, fmt.Sprintf("n.nspname IN (%s)", strings.Join(placeholders, ", ")))
+		args = append(args, schemas)
+		conditions = append(conditions, fmt.Sprintf("n.nspname = ANY($%d)", len(args)))
 	} else if !includeSystem {
 		// Exclude system schemas by default
 		conditions = append(conditions, "n.nspname NOT IN ('pg_catalog', 'pg_toast', 'information_schema')")
 	}
 
-	// Exclude specific tables
+	// Exclude specific tables (bare or schema-qualified names)
 	if len(excludeTables) > 0 {
-		placeholders := make([]string, len(excludeTables))
-		for i := range excludeTables {
-			placeholders[i] = fmt.Sprintf("'%s'", excludeTables[i])
-		}
-		conditions = append(conditions, fmt.Sprintf("c.relname NOT IN (%s)", strings.Join(placeholders, ", ")))
+		args = append(args, excludeTables)
+		conditions = append(conditions, fmt.Sprintf(
+			"NOT (c.relname = ANY($%d) OR n.nspname || '.' || c.relname = ANY($%d))",
+			len(args), len(args)))
 	}
 
 	// Only regular tables (not indexes, sequences, etc.)
 	conditions = append(conditions, "c.relkind = 'r'")
 
-	whereClause := ""
-	if len(conditions) > 0 {
-		whereClause = "WHERE " + strings.Join(conditions, " AND ")
-	}
-
 	query := fmt.Sprintf(`
 		SELECT n.nspname || '.' || c.relname AS full_name
 		FROM pg_class c
 		JOIN pg_namespace n ON c.relnamespace = n.oid
-		%s
+		WHERE %s
 		ORDER BY c.relname
-	`, whereClause)
+	`, strings.Join(conditions, " AND "))
 
-	rows, err := db.conn.Query(ctx, query)
+	rows, err := db.conn.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("error querying tables: %w", err)
 	}
@@ -601,21 +646,20 @@ func (db *DB) GetTablePages(tableName string) (int, error) {
 		relName = tableName
 	}
 
-	var query string
+	var row pgx.Row
 	if schemaName != "" {
-		query = fmt.Sprintf(`
+		row = db.conn.QueryRow(ctx, `
 			SELECT c.relpages
 			FROM pg_class c
 			JOIN pg_namespace n ON c.relnamespace = n.oid
-			WHERE c.relname = '%s' AND n.nspname = '%s'
+			WHERE c.relname = $1 AND n.nspname = $2
 		`, relName, schemaName)
 	} else {
-		query = fmt.Sprintf("SELECT relpages FROM pg_class WHERE relname = '%s'", relName)
+		row = db.conn.QueryRow(ctx, "SELECT relpages FROM pg_class WHERE relname = $1", relName)
 	}
 
 	var pages int
-	err := db.conn.QueryRow(ctx, query).Scan(&pages)
-	if err != nil {
+	if err := row.Scan(&pages); err != nil {
 		return 0, fmt.Errorf("failed to get page count for '%s': %w", tableName, err)
 	}
 	return pages, nil

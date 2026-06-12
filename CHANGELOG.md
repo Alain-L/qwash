@@ -8,6 +8,8 @@ All notable changes to this project will be documented in this file.
 - **`--slow --delay` now actually throttles**: the delay was silently ignored, so slow mode ran at full speed while promising minimal production impact
 - **Compaction procedure max-loops bug**: a PL/pgSQL variable scoping issue made the procedure return NULL instead of -2 when a page needed the maximum number of update rounds, aborting the whole table compaction
 - **Bloat estimation filter hardening**: the per-table bloat query now fails fast if the embedded SQL marker is missing (previously it silently ran unfiltered and could target the wrong table) and passes schema/table names as query parameters
+- **`--schema` and `--exclude-table` are now honored in `--estimate` mode**: they were silently ignored (the report covered the whole database while claiming to filter)
+- **Homonym tables are targeted unambiguously**: table names are resolved once to their canonical `schema.table` form (search_path rules); previously the bloat estimation could match a same-named table in another schema than the one actually compacted, and the anti-concurrency advisory lock keyed on the raw name (`orders` and `public.orders` did not collide)
 - Conflicting-lock check no longer fails spuriously when the lock holder has no `pg_stat_activity` entry (e.g. prepared transactions)
 - `RESET lock_timeout` instead of `SET lock_timeout = 0`, preserving any server-side configuration
 - pgx error comparisons use `errors.Is` instead of error string matching
@@ -21,6 +23,9 @@ All notable changes to this project will be documented in this file.
 - **`--debloat --toast`/`--btree` is rejected**: only heap debloat is implemented (previously the heap was silently debloated instead)
 - The compaction procedure is created in `pg_temp`: no orphan function left in `public` after an interrupted run, and no CREATE privilege needed
 - `--test-connection` prints the resolved target (`user@host:port/dbname`)
+- Debloat results report schema-qualified table names (`public.orders` instead of `orders`)
+- `--debloat -t unknown_table` fails fast with a clear error instead of reporting a confusing per-table failure
+- `--exclude-table` accepts schema-qualified names (`-X staging.orders`)
 
 ### Added
 - `--all` flag to explicitly debloat every table in the database

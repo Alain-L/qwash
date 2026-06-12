@@ -8,7 +8,7 @@
   },
   "results": [
     {
-      "table": "golden_test",
+      "table": "public.golden_test",
       "initial_pages": 37,
       "final_pages": 19,
       "bloat_removed_pages": 18,

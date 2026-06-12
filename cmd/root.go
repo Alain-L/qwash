@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -309,6 +310,17 @@ func executeAnalysis(cmd *cobra.Command, args []string) {
 	}
 }
 
+// keepIf returns the items of a slice matching the predicate.
+func keepIf[T any](items []T, pred func(T) bool) []T {
+	var out []T
+	for _, it := range items {
+		if pred(it) {
+			out = append(out, it)
+		}
+	}
+	return out
+}
+
 // promptPassword interactively reads the database password (--password/-W),
 // without echoing it to the terminal — same behavior as psql -W.
 func promptPassword() string {
@@ -373,6 +385,28 @@ func runEstimate(connection *db.DB) {
 			slog.Warn("failed to analyze B-Tree index bloat", "error", err)
 			// Continue without index data
 		}
+	}
+
+	// Apply --schema and --exclude-table filters. These used to be silently
+	// ignored in estimate mode (only --debloat honored them), so a report
+	// could include tables the user believed were filtered out.
+	if len(targetSchemas) > 0 {
+		tableBloat = keepIf(tableBloat, func(t analysis.BloatTable) bool { return slices.Contains(targetSchemas, t.Schema) })
+		toastBloat = keepIf(toastBloat, func(t analysis.ToastBloat) bool { return slices.Contains(targetSchemas, t.Schema) })
+		indexBloat = keepIf(indexBloat, func(i analysis.BloatIndex) bool { return slices.Contains(targetSchemas, i.Schema) })
+	}
+	if len(excludeTbl) > 0 {
+		excluded := func(schema, table string) bool {
+			for _, x := range excludeTbl {
+				if x == table || x == schema+"."+table {
+					return true
+				}
+			}
+			return false
+		}
+		tableBloat = keepIf(tableBloat, func(t analysis.BloatTable) bool { return !excluded(t.Schema, t.TableName) })
+		toastBloat = keepIf(toastBloat, func(t analysis.ToastBloat) bool { return !excluded(t.Schema, t.TableName) })
+		indexBloat = keepIf(indexBloat, func(i analysis.BloatIndex) bool { return !excluded(i.Schema, i.TableName) })
 	}
 
 	// Filter by specific tables if -t is provided
@@ -800,12 +834,25 @@ func printParallelProgress(completed, total, workers int) {
 
 // getTargetTables returns the list of tables to debloat based on flags
 func getTargetTables(connection *db.DB) ([]string, error) {
-	// If specific tables are provided, use them
+	// If specific tables are provided, resolve each one to its canonical
+	// schema-qualified name (search_path rules) so that every downstream
+	// consumer — estimation, advisory lock, DML — designates the same
+	// relation. This also fails fast on tables that don't exist, instead
+	// of reporting a confusing per-table error later.
 	if len(targetTables) > 0 {
-		return targetTables, nil
+		resolved := make([]string, 0, len(targetTables))
+		for _, t := range targetTables {
+			qualified, err := connection.ResolveTableName(t)
+			if err != nil {
+				return nil, err
+			}
+			resolved = append(resolved, qualified)
+		}
+		return resolved, nil
 	}
 
-	// Otherwise, get all tables (filtered by schema if specified)
+	// Otherwise, get all tables (filtered by schema if specified);
+	// ListTablesFiltered already returns schema-qualified names.
 	tables, err := connection.ListTablesFiltered(targetSchemas, systemFlag, excludeTbl)
 	if err != nil {
 		return nil, err
