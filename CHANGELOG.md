@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **Exact byte sizes**: the table report and JSON no longer round-trip sizes through `pg_size_pretty` and back, which drifted by up to half the displayed unit per table; sizes are now exact to the byte
+- **Bloat query runs once per debloat**: the catalog-wide estimation used to run once per table and again per compaction pass (≈3N+ scans, quadratic on large databases); it now runs a single time and results are looked up from a map
 - **`--slow --delay` now actually throttles**: the delay was silently ignored, so slow mode ran at full speed while promising minimal production impact
 - **Compaction procedure max-loops bug**: a PL/pgSQL variable scoping issue made the procedure return NULL instead of -2 when a page needed the maximum number of update rounds, aborting the whole table compaction
 - **Bloat estimation filter hardening**: the per-table bloat query now fails fast if the embedded SQL marker is missing (previously it silently ran unfiltered and could target the wrong table) and passes schema/table names as query parameters

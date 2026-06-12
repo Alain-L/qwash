@@ -568,6 +568,15 @@ func runDebloat(connection *db.DB) {
 		return
 	}
 
+	// Estimate bloat for the whole database in a single catalog-wide scan,
+	// then look results up per table. Running the bloat query once (instead of
+	// once per table, and again per compaction pass) avoids quadratic cost on
+	// large databases.
+	allBloat, err := connection.GetAllBloatPages()
+	if err != nil {
+		fatal("failed to estimate bloat", "error", err)
+	}
+
 	// Calculate total bloat, total size, and build map for LPT scheduling
 	// LPT (Longest Processing Time First) sorts tables by bloat size descending
 	// to optimize parallel processing - biggest tables first so smaller ones fill gaps
@@ -575,12 +584,11 @@ func runDebloat(connection *db.DB) {
 	var totalDatabaseSize int64
 	tableBloatPages := make(map[string]int)
 	for _, table := range tables {
-		bloatPages, err := connection.GetBloatPages(table)
-		if err == nil && bloatPages > 0 {
+		if bloatPages := allBloat[table]; bloatPages > 0 {
 			totalBloat += int64(bloatPages) * 8192 // Convert pages to bytes (8KB per page)
 			tableBloatPages[table] = bloatPages
 		}
-		// Get total table size for percentage calculation
+		// Get total table size for percentage calculation (cheap pg_class lookup)
 		tablePages, err := connection.GetTablePages(table)
 		if err == nil && tablePages > 0 {
 			totalDatabaseSize += int64(tablePages) * 8192
@@ -642,10 +650,10 @@ func runDebloat(connection *db.DB) {
 
 	if numWorkers == 1 {
 		// Sequential mode (original behavior)
-		results, limitReached = runDebloatSequential(connection, tables, limitBytes)
+		results, limitReached = runDebloatSequential(connection, tables, tableBloatPages, limitBytes)
 	} else {
 		// Parallel mode
-		results, limitReached = runDebloatParallel(connection, tables, numWorkers, limitBytes)
+		results, limitReached = runDebloatParallel(connection, tables, tableBloatPages, numWorkers, limitBytes)
 	}
 
 	totalDuration := time.Since(startTime)
@@ -668,7 +676,7 @@ func runDebloat(connection *db.DB) {
 }
 
 // runDebloatSequential processes tables one at a time (original behavior)
-func runDebloatSequential(connection *db.DB, tables []string, limitBytes int64) ([]analysis.DebloatResult, bool) {
+func runDebloatSequential(connection *db.DB, tables []string, bloatByTable map[string]int, limitBytes int64) ([]analysis.DebloatResult, bool) {
 	var results []analysis.DebloatResult
 	var totalBloatRemoved int64
 	limitReached := false
@@ -694,7 +702,7 @@ func runDebloatSequential(connection *db.DB, tables []string, limitBytes int64) 
 		}
 
 		connection.CurrentTableIndex = i
-		result := processTable(connection, table)
+		result := processTable(connection, table, bloatByTable[table])
 		results = append(results, result)
 
 		if result.BloatRemoved > 0 {
@@ -711,7 +719,7 @@ func runDebloatSequential(connection *db.DB, tables []string, limitBytes int64) 
 }
 
 // runDebloatParallel processes tables concurrently using a worker pool
-func runDebloatParallel(connection *db.DB, tables []string, numWorkers int, limitBytes int64) ([]analysis.DebloatResult, bool) {
+func runDebloatParallel(connection *db.DB, tables []string, bloatByTable map[string]int, numWorkers int, limitBytes int64) ([]analysis.DebloatResult, bool) {
 	// Channels for work distribution and results
 	tableChan := make(chan string, len(tables))
 	resultChan := make(chan analysis.DebloatResult, len(tables))
@@ -772,7 +780,7 @@ func runDebloatParallel(connection *db.DB, tables []string, numWorkers int, limi
 					continue
 				}
 
-				result := processTable(w, table)
+				result := processTable(w, table, bloatByTable[table])
 				resultChan <- result
 
 				// Update counters
@@ -861,17 +869,12 @@ func getTargetTables(connection *db.DB) ([]string, error) {
 	return tables, nil
 }
 
-// processTable debloats a single table and returns the result
-func processTable(connection *db.DB, table string) analysis.DebloatResult {
+// processTable debloats a single table and returns the result.
+// bloatPages is the estimated bloat (in pages) precomputed once for the whole
+// database, so this function does not re-run the catalog-wide bloat query.
+func processTable(connection *db.DB, table string, bloatPages int) analysis.DebloatResult {
 	startTime := time.Now()
 	result := analysis.DebloatResult{Table: table, DryRun: dryRunFlag}
-
-	// Get initial bloat estimate
-	bloatPages, err := connection.GetBloatPages(table)
-	if err != nil {
-		result.Error = fmt.Sprintf("failed to estimate bloat: %v", err)
-		return result
-	}
 
 	if bloatPages <= 0 {
 		if verboseFlag {
@@ -887,6 +890,14 @@ func processTable(connection *db.DB, table string) analysis.DebloatResult {
 		return result
 	}
 	result.InitialPages = initialPages
+
+	// Target page count: compacting down to (current pages - bloat pages).
+	// Computed once and held fixed across passes, so later passes don't chase
+	// a target that drifts below the real minimum as the table shrinks.
+	toPage := initialPages - bloatPages
+	if toPage < 0 {
+		toPage = 0
+	}
 
 	if dryRunFlag {
 		// Dry-run: just show what would happen
@@ -915,7 +926,7 @@ func processTable(connection *db.DB, table string) analysis.DebloatResult {
 		passes = 3 // slow: 3 passes for thorough compaction
 	}
 	for pass := 1; pass <= passes; pass++ {
-		compactErr = connection.CompactTableUpdate(table)
+		compactErr = connection.CompactTableToTarget(table, toPage)
 		if compactErr != nil {
 			break
 		}

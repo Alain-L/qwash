@@ -311,15 +311,53 @@ func (db *DB) getUpdatableColumn(tableName string) (string, error) {
 // processing only the estimated bloated pages instead of the full table.
 // This approach is efficient and may require 1-2 passes for complete compaction.
 func (db *DB) CompactTableUpdate(tableName string) error {
-	ctx := context.Background()
-
-	// Resolve to a canonical "schema.table" name first, so that the bloat
-	// estimation, the advisory lock and the DML below all designate the same
-	// relation (an unqualified name could otherwise match homonym tables in
-	// different schemas depending on the consumer).
-	tableName, err := db.ResolveTableName(tableName)
+	resolved, err := db.ResolveTableName(tableName)
 	if err != nil {
 		return err
+	}
+	toPage, err := db.estimateTargetPages(resolved)
+	if err != nil {
+		return err
+	}
+	return db.compactToTarget(resolved, toPage)
+}
+
+// CompactTableToTarget compacts an already-targeted table down to toPage,
+// skipping the internal bloat estimation. The orchestrator uses this with a
+// target precomputed once from GetAllBloatPages, instead of re-running the
+// full-catalog bloat query for every table (and every compaction pass).
+func (db *DB) CompactTableToTarget(tableName string, toPage int) error {
+	resolved, err := db.ResolveTableName(tableName)
+	if err != nil {
+		return err
+	}
+	return db.compactToTarget(resolved, toPage)
+}
+
+// estimateTargetPages returns the target page count (actual pages minus
+// estimated bloat pages) for an already-resolved table.
+func (db *DB) estimateTargetPages(tableName string) (int, error) {
+	initialPages, err := db.GetTablePages(tableName)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get initial page count: %w", err)
+	}
+	bloatPages, err := db.GetBloatPages(tableName)
+	if err != nil {
+		return 0, fmt.Errorf("failed to estimate bloat: %w", err)
+	}
+	toPage := initialPages - bloatPages
+	if toPage < 0 {
+		toPage = 0
+	}
+	return toPage, nil
+}
+
+// compactToTarget runs the UPDATE-based compaction on an already-resolved
+// table down to the given target page count.
+func (db *DB) compactToTarget(tableName string, toPage int) error {
+	ctx := context.Background()
+	if toPage < 0 {
+		toPage = 0
 	}
 
 	// Safety check: verify no conflicting locks on table
@@ -369,26 +407,20 @@ func (db *DB) CompactTableUpdate(tableName string) error {
 	}
 	defer db.conn.Exec(ctx, "SET session_replication_role = DEFAULT")
 
-	// Get initial stats
+	// Get the current page count (a cheap pg_class lookup) to know where the
+	// page loop starts; the target page count was supplied by the caller.
 	initialPages, err := db.GetTablePages(tableName)
 	if err != nil {
 		return fmt.Errorf("failed to get initial page count: %w", err)
 	}
-
-	// Calculate to_page (target minimum pages) using bloat estimation
-	bloatPages, err := db.GetBloatPages(tableName)
-	if err != nil {
-		return fmt.Errorf("failed to estimate bloat: %w", err)
-	}
-	toPage := initialPages - bloatPages
-	if toPage < 0 {
-		toPage = 0
+	if toPage > initialPages {
+		toPage = initialPages
 	}
 
 	if db.Verbose {
 		fmt.Printf("Compacting '%s' using UPDATE method (column: %s)...\n", tableName, column)
 		fmt.Printf("  Initial: %d pages, target: %d pages, bloat: %d pages\n",
-			initialPages, toPage, bloatPages)
+			initialPages, toPage, initialPages-toPage)
 	}
 
 	// Create stored procedure from embedded SQL. It lives in pg_temp so it is
@@ -569,6 +601,49 @@ func (db *DB) GetBloatPages(tableName string) (int, error) {
 	}
 
 	return actualPages - minPages, nil
+}
+
+// GetAllBloatPages runs the bloat estimation query a single time for the whole
+// database and returns a map of "schema.table" -> bloat pages. The embedded
+// query already computes every table on each call, so building the map once
+// and looking results up avoids re-running the catalog-wide scan once per
+// table (and per compaction pass), which was quadratic on large databases.
+func (db *DB) GetAllBloatPages() (map[string]int, error) {
+	ctx := context.Background()
+
+	rows, err := db.conn.Query(ctx, sql.TableBloatSQL)
+	if err != nil {
+		return nil, fmt.Errorf("error querying bloat info: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]int)
+	for rows.Next() {
+		var (
+			tableName   string
+			minPages    int
+			actualPages int
+		)
+		if err := rows.Scan(
+			&tableName,
+			new(int),   // live_tup
+			new(int64), // dead_tup
+			&minPages,
+			&actualPages,
+			new(int),      // fillfactor
+			new(int64),    // relation_size (bytes)
+			new(int64),    // TOAST_size (bytes)
+			new(int64),    // bloat_size (bytes)
+			new(*float64), // bloat_pct (nullable)
+		); err != nil {
+			return nil, fmt.Errorf("error scanning bloat row: %w", err)
+		}
+		result[tableName] = actualPages - minPages
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error reading bloat rows: %w", err)
+	}
+	return result, nil
 }
 
 // ListTablesFiltered returns tables filtered by schemas, system flag, and exclusion list.
