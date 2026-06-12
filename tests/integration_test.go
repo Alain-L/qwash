@@ -884,7 +884,8 @@ func TestCLIErrorDebloatWithToast(t *testing.T) {
 	}
 }
 
-// TestCLIErrorDebloatWithoutTable tests behavior when no table specified for debloat
+// TestCLIErrorDebloatWithoutTable tests that --debloat without -t fails:
+// debloating the whole database must be requested explicitly with --all
 func TestCLIErrorDebloatWithoutTable(t *testing.T) {
 	conn := setupTestDB(t)
 	// Create some tables
@@ -892,14 +893,56 @@ func TestCLIErrorDebloatWithoutTable(t *testing.T) {
 	createBloatedTable(t, conn, "auto_table_2", 1000, 50)
 	conn.Close()
 
-	// Without -t, should process all tables (not an error)
 	output, err := runQwashCLI(t, "--debloat")
+
+	// Should fail: neither -t nor --all was given
+	if err == nil {
+		t.Errorf("Expected error when using --debloat without -t or --all, but got success\nOutput: %s", output)
+	}
+
+	// Should mention the --all escape hatch
+	if !strings.Contains(output, "--all") {
+		t.Logf("Warning: Error message doesn't mention --all\nOutput: %s", output)
+	}
+}
+
+// TestCLIDebloatAll tests that --debloat --all explicitly processes all tables
+func TestCLIDebloatAll(t *testing.T) {
+	conn := setupTestDB(t)
+	createBloatedTable(t, conn, "all_table_1", 1000, 50)
+	createBloatedTable(t, conn, "all_table_2", 1000, 50)
+	initial1 := getTablePages(t, conn, "all_table_1")
+	initial2 := getTablePages(t, conn, "all_table_2")
+	conn.Close()
+
+	output, err := runQwashCLI(t, "--debloat", "--all")
+	if err != nil {
+		t.Fatalf("CLI failed: %v\nOutput: %s", err, output)
+	}
 
 	t.Logf("CLI output:\n%s", output)
 
-	// This should work (process all tables)
-	if err != nil {
-		t.Logf("Note: debloat without -t returned error (may be expected): %v", err)
+	conn2, _ := db.Connect(getTestConfig(), false)
+	defer conn2.Close()
+	if final := getTablePages(t, conn2, "all_table_1"); final >= initial1 {
+		t.Errorf("Expected page reduction on all_table_1: initial=%d, final=%d", initial1, final)
+	}
+	if final := getTablePages(t, conn2, "all_table_2"); final >= initial2 {
+		t.Errorf("Expected page reduction on all_table_2: initial=%d, final=%d", initial2, final)
+	}
+}
+
+// TestCLIErrorAllWithTable tests that --all and -t are mutually exclusive
+func TestCLIErrorAllWithTable(t *testing.T) {
+	conn := setupTestDB(t)
+	createBloatedTable(t, conn, "all_conflict_table", 1000, 50)
+	conn.Close()
+
+	output, err := runQwashCLI(t, "--debloat", "--all", "-t", "all_conflict_table")
+
+	// Should fail
+	if err == nil {
+		t.Errorf("Expected error when using --all with -t, but got success\nOutput: %s", output)
 	}
 }
 

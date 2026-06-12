@@ -46,6 +46,7 @@ var (
 
 	// Debloat options
 	debloatFlag bool   // --debloat (-B)
+	allFlag     bool   // --all (debloat every table when no -t is given)
 	fastFlag    bool   // --fast
 	slowFlag    bool   // --slow (1 page at a time with delay)
 	delayMs     int    // --delay (milliseconds between operations in slow mode)
@@ -124,6 +125,8 @@ func init() {
 	// Debloat options
 	rootCmd.PersistentFlags().BoolVarP(&debloatFlag, "debloat", "B", false,
 		"Perform bloat reduction on tables")
+	rootCmd.PersistentFlags().BoolVar(&allFlag, "all", false,
+		"Debloat every table in the database (required when --table is not given)")
 	rootCmd.PersistentFlags().BoolVar(&fastFlag, "fast", false,
 		"Fast mode: 4 threads, 1 pass (default: 2 threads, 2 passes)")
 	rootCmd.PersistentFlags().BoolVar(&slowFlag, "slow", false,
@@ -173,6 +176,18 @@ func executeAnalysis(cmd *cobra.Command, args []string) {
 	// Without this guard, --debloat --toast would silently debloat the heap.
 	if debloatFlag && (toastFlag || btreeFlag) {
 		fatal("--toast and --btree are not supported with --debloat (-B); only heap debloat is implemented")
+	}
+
+	// Debloating the whole database must be an explicit decision: require
+	// either a table list (-t) or the --all flag.
+	if debloatFlag && len(targetTables) == 0 && !allFlag {
+		fatal("--debloat requires --table (-t) to target specific tables, or --all to debloat every table")
+	}
+	if allFlag && !debloatFlag {
+		fatal("--all requires --debloat (-B)")
+	}
+	if allFlag && len(targetTables) > 0 {
+		fatal("--all and --table (-t) are mutually exclusive")
 	}
 
 	// --reindex requires --debloat
