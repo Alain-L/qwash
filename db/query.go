@@ -541,29 +541,24 @@ func (db *DB) GetBloatPages(tableName string) (int, error) {
 	row := db.conn.QueryRow(ctx, modifiedQuery, args...)
 
 	var (
-		_           string // table_name
-		_           int    // live_tup
-		_           int64  // dead_tup
 		minPages    int
 		actualPages int
-		_           int      // fillfactor
-		_           string   // relation_size
-		_           string   // TOAST_size
-		_           string   // bloat_size
-		bloatPct    *float64 // bloat_pct (nullable)
+		bloatPct    *float64 // nullable
 	)
 
+	// Only min/actual pages are needed here; the other columns are scanned
+	// into throwaway destinations to satisfy the row shape.
 	err := row.Scan(
 		new(string), // table_name
 		new(int),    // live_tup
 		new(int64),  // dead_tup
 		&minPages,
 		&actualPages,
-		new(int),    // fillfactor
-		new(string), // relation_size
-		new(string), // TOAST_size
-		new(string), // bloat_size
-		&bloatPct,   // bloat_pct (nullable)
+		new(int),   // fillfactor
+		new(int64), // relation_size (bytes)
+		new(int64), // TOAST_size (bytes)
+		new(int64), // bloat_size (bytes)
+		&bloatPct,  // bloat_pct (nullable)
 	)
 
 	if errors.Is(err, pgx.ErrNoRows) {

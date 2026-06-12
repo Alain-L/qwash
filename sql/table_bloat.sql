@@ -6,6 +6,10 @@
 --           with actual pages used, accounting for fillfactor and alignment
 --
 -- Compatible with PostgreSQL 9.4+ (requires multiple CTEs)
+--
+-- Sizes (relation_size, TOAST_size, bloat_size) are returned in raw bytes so
+-- the Go code consumes exact integers. To read this query by hand, wrap those
+-- columns in pg_size_pretty(...).
 
 WITH constants AS (
   -- PostgreSQL internal constants for bloat calculation
@@ -136,19 +140,15 @@ SELECT
   estimated_min_pages AS min_pages_required,
   actual_pages,
   fillfactor,
-  pg_size_pretty(
-    pg_relation_size(format('%I.%I', schemaname, tblname)::regclass)
-  ) AS relation_size,
-  COALESCE(
-    CASE WHEN reltoastrelid <> 0
-         THEN pg_size_pretty(pg_relation_size(reltoastrelid::regclass))
-         ELSE 'N/A'
-    END, 'N/A'
-  ) AS "TOAST_size",
+  pg_relation_size(format('%I.%I', schemaname, tblname)::regclass)::bigint
+    AS relation_size,
+  CASE WHEN reltoastrelid <> 0
+       THEN pg_relation_size(reltoastrelid::regclass)
+       ELSE 0
+  END::bigint AS "TOAST_size",
   -- Bloat size: use GREATEST to avoid negative values (over-estimated min_pages)
-  pg_size_pretty(
-    (GREATEST(0, actual_pages - estimated_min_pages) * block_size)::bigint
-  ) AS bloat_size,
+  (GREATEST(0, actual_pages - estimated_min_pages) * block_size)::bigint
+    AS bloat_size,
   -- Bloat percentage: use GREATEST and NULLIF to handle edge cases
   ROUND(
     (100.0 * GREATEST(0, actual_pages - estimated_min_pages)
