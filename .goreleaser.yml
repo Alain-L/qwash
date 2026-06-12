@@ -57,6 +57,8 @@ nfpms:
         dst: /usr/share/doc/qwash/sql/table_bloat.sql
       - src: sql/toast_bloat.sql
         dst: /usr/share/doc/qwash/sql/toast_bloat.sql
+      - src: sql/btree_bloat.sql
+        dst: /usr/share/doc/qwash/sql/btree_bloat.sql
 
 checksum:
   name_template: 'checksums.txt'
@@ -64,10 +66,17 @@ checksum:
 changelog:
   sort: asc
   filters:
+    # Case-insensitive, aligned with the project's capitalized commit prefixes.
+    # Keep user-facing changes (Fix, Feat, Perf); drop internal noise.
     exclude:
-      - '^docs:'
-      - '^test:'
-      - '^chore:'
+      - '(?i)^docs:'
+      - '(?i)^test:'
+      - '(?i)^chore:'
+      - '(?i)^style:'
+      - '(?i)^ci:'
+      - '(?i)^cleanup:'
+      - '(?i)^refactor:'
+      - '(?i)^build:'
 
 release:
   github:
