@@ -69,11 +69,16 @@ go build -o bin/qwash
 
 ## Quick Start
 
+qwash follows the standard PostgreSQL client conventions: connection
+parameters not given on the command line are resolved like psql would, from
+`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`, `PGSSLMODE`,
+`~/.pgpass` and the usual libpq defaults (local socket, OS user, `sslmode=prefer`).
+
 ### Estimate Bloat
 
 ```sh
 # Analyze all tables in a database (heap bloat)
-./bin/qwash --estimate -d mydb -U postgres -H localhost
+./bin/qwash --estimate -d mydb -U postgres -h localhost
 
 # Analyze TOAST bloat
 ./bin/qwash --estimate --toast -d mydb
@@ -129,12 +134,12 @@ Usage:
   qwash [flags]
 
 Connection:
-  -d, --dbname strings    Target database(s)
-  -U, --dbuser strings    Database user(s)
-  -H, --host strings      Database host(s) (default: localhost)
-  -P, --port strings      Database port(s) (default: 5432)
-  -W, --password string   Database password
-      --sslmode string    SSL mode: disable, require, verify-ca, verify-full (default: disable)
+  -d, --dbname string     Database name (default: PGDATABASE, or the user name)
+  -U, --dbuser string     Database user (default: PGUSER, or the OS user)
+  -h, --host string       Database host or socket directory (default: PGHOST, or local socket)
+  -p, --port string       Database port (default: PGPORT, or 5432)
+  -W, --password          Force password prompt (default: PGPASSWORD, or ~/.pgpass)
+      --sslmode string    SSL mode: disable, allow, prefer, require, verify-ca, verify-full (default: PGSSLMODE, or prefer)
 
 Analysis:
   -E, --estimate          Display bloat estimation report
@@ -164,7 +169,7 @@ Output:
 
 Other:
   -T, --test-connection   Test database connection and exit
-  -h, --help              Show help
+      --help              Show help
 ```
 
 ## How It Works

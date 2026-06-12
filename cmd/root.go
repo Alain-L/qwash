@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,18 +17,21 @@ import (
 	"qwash/output"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 // Global Flags
 var (
-	// Database connection
-	dbName       []string // --dbname
-	user         []string // --dbuser
-	host         []string // --host
-	port         []string // --port
-	pass         string   // --password
-	sslMode      string   // --sslmode
-	testConnFlag bool     // --test-connection
+	// Database connection. Empty values are omitted from the connection
+	// string so that pgx falls back to the standard PostgreSQL client
+	// conventions (PGHOST, PGUSER, PGPASSWORD, ~/.pgpass, defaults...).
+	dbName         string // --dbname (-d)
+	user           string // --dbuser (-U)
+	host           string // --host (-h)
+	port           string // --port (-p)
+	passwordPrompt bool   // --password (-W): force interactive password prompt
+	sslMode        string // --sslmode
+	testConnFlag   bool   // --test-connection
 
 	// Targeting options
 	targetTables  []string // --table (-t)
@@ -82,19 +86,27 @@ func Execute(version, commit, date string) {
 
 // init sets up the CLI flags
 func init() {
-	// Database connection options
-	rootCmd.PersistentFlags().StringSliceVarP(&dbName, "dbname", "d", nil,
-		"Target database(s) for analysis")
-	rootCmd.PersistentFlags().StringSliceVarP(&user, "dbuser", "U", nil,
-		"Database user(s) for connection")
-	rootCmd.PersistentFlags().StringSliceVarP(&host, "host", "H", nil,
-		"Database host(s) (default: localhost)")
-	rootCmd.PersistentFlags().StringSliceVarP(&port, "port", "P", nil,
-		"Database port(s) (default: 5432)")
-	rootCmd.PersistentFlags().StringVarP(&pass, "password", "W", "",
-		"Database password (optional)")
-	rootCmd.PersistentFlags().StringVar(&sslMode, "sslmode", "disable",
-		"SSL mode (disable, require, verify-ca, verify-full)")
+	// Define the help flag without a shorthand (like psql, which uses -? and
+	// --help) so that -h stays available for --host. Cobra only adds its own
+	// -h shorthand when no help flag is registered.
+	rootCmd.PersistentFlags().Bool("help", false,
+		"Show help")
+
+	// Database connection options, following the usual PostgreSQL client
+	// conventions: same short flags as psql, PG* environment variables and
+	// ~/.pgpass honored when a parameter is not given.
+	rootCmd.PersistentFlags().StringVarP(&dbName, "dbname", "d", "",
+		"Database name (default: PGDATABASE, or the user name)")
+	rootCmd.PersistentFlags().StringVarP(&user, "dbuser", "U", "",
+		"Database user (default: PGUSER, or the OS user)")
+	rootCmd.PersistentFlags().StringVarP(&host, "host", "h", "",
+		"Database host or socket directory (default: PGHOST, or local socket)")
+	rootCmd.PersistentFlags().StringVarP(&port, "port", "p", "",
+		"Database port (default: PGPORT, or 5432)")
+	rootCmd.PersistentFlags().BoolVarP(&passwordPrompt, "password", "W", false,
+		"Force password prompt (default: PGPASSWORD, or ~/.pgpass)")
+	rootCmd.PersistentFlags().StringVar(&sslMode, "sslmode", "",
+		"SSL mode: disable, allow, prefer, require, verify-ca, verify-full (default: PGSSLMODE, or prefer)")
 
 	// Database testing
 	rootCmd.PersistentFlags().BoolVarP(&testConnFlag, "test-connection", "T", false,
@@ -157,14 +169,17 @@ func executeAnalysis(cmd *cobra.Command, args []string) {
 		setLogLevel(slog.LevelInfo)
 	}
 
-	// Build connection config
+	// Build connection config. Only explicitly-given parameters are set;
+	// pgx resolves the rest from the PG* environment and libpq defaults.
 	dbConfig := db.Config{
-		Host:     getFirstOrDefault(host, "localhost"),
-		Port:     getFirstOrDefault(port, "5432"),
-		User:     getFirstOrDefault(user, "postgres"),
-		Password: pass,
-		Database: getFirstOrDefault(dbName, "postgres"),
+		Host:     host,
+		Port:     port,
+		User:     user,
+		Database: dbName,
 		SSLMode:  sslMode,
+	}
+	if passwordPrompt {
+		dbConfig.Password = promptPassword()
 	}
 
 	// Step 1: Validate flag combinations
@@ -247,17 +262,15 @@ func executeAnalysis(cmd *cobra.Command, args []string) {
 
 	// Step 2: Test database connection if requested
 	if testConnFlag {
-		if verboseFlag {
-			fmt.Printf("Connecting to %s@%s:%s/%s...\n",
-				dbConfig.User, dbConfig.Host, dbConfig.Port, dbConfig.Database)
-		}
 		connection, err := db.Connect(dbConfig, verboseFlag)
 		if err != nil {
 			fatal("connection failed", "error", err)
 		}
 		defer connection.Close()
 
-		fmt.Println("Connection OK")
+		// Show the target actually resolved by pgx (flags, PG* environment
+		// variables or defaults), so the user can see where they landed.
+		fmt.Printf("Connection OK (%s)\n", connection.ResolvedTarget())
 		databases, err := connection.ListDatabases()
 		if err == nil {
 			fmt.Println("Available databases:")
@@ -296,12 +309,16 @@ func executeAnalysis(cmd *cobra.Command, args []string) {
 	}
 }
 
-// Helper function to get the first value from a slice or return a default value
-func getFirstOrDefault(arr []string, defaultValue string) string {
-	if len(arr) > 0 {
-		return arr[0]
+// promptPassword interactively reads the database password (--password/-W),
+// without echoing it to the terminal — same behavior as psql -W.
+func promptPassword() string {
+	fmt.Fprint(os.Stderr, "Password: ")
+	pw, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		fatal("failed to read password", "error", err)
 	}
-	return defaultValue
+	return string(pw)
 }
 
 // runEstimate executes the bloat estimation report

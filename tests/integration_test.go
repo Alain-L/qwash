@@ -194,24 +194,55 @@ func getTablePages(t *testing.T, conn *db.DB, tableName string) int {
 func runQwashCLI(t *testing.T, args ...string) (string, error) {
 	cfg := getTestConfig()
 
-	// Build base args with connection info
+	// Build base args with connection info; the password goes through the
+	// PGPASSWORD environment variable, like any PostgreSQL client.
 	baseArgs := []string{
-		"-H", cfg.Host,
-		"-P", cfg.Port,
+		"-h", cfg.Host,
+		"-p", cfg.Port,
 		"-U", cfg.User,
 		"-d", cfg.Database,
 		"--sslmode", cfg.SSLMode,
-	}
-	if cfg.Password != "" {
-		baseArgs = append(baseArgs, "-W", cfg.Password)
 	}
 
 	allArgs := append(baseArgs, args...)
 	cmd := exec.Command("./bin/qwash", allArgs...)
 	cmd.Dir = ".." // Run from project root
+	if cfg.Password != "" {
+		cmd.Env = append(os.Environ(), "PGPASSWORD="+cfg.Password)
+	}
 
 	output, err := cmd.CombinedOutput()
 	return string(output), err
+}
+
+// TestCLIConnectionFromEnvironment verifies that the binary follows the
+// standard PostgreSQL client conventions: PG* environment variables are
+// honored when no connection flag is given (regression test: they used to
+// be silently ignored in favor of hardcoded defaults).
+func TestCLIConnectionFromEnvironment(t *testing.T) {
+	setupTestDB(t).Close()
+	cfg := getTestConfig()
+
+	cmd := exec.Command("./bin/qwash", "-T")
+	cmd.Dir = ".." // Run from project root
+	// Duplicate keys in exec.Cmd.Env resolve to the last value, so these
+	// override any PG* variables already present in the test environment.
+	cmd.Env = append(os.Environ(),
+		"PGHOST="+cfg.Host,
+		"PGPORT="+cfg.Port,
+		"PGUSER="+cfg.User,
+		"PGPASSWORD="+cfg.Password,
+		"PGDATABASE="+cfg.Database,
+		"PGSSLMODE="+cfg.SSLMode,
+	)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Expected PG* environment to be honored: %v\nOutput: %s", err, out)
+	}
+	if !strings.Contains(string(out), "Connection OK") {
+		t.Errorf("Expected 'Connection OK' in output\nOutput: %s", out)
+	}
 }
 
 // =============================================================================

@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -125,22 +126,23 @@ func TestTestConnectionWithSSLModes(t *testing.T) {
 func runQwashCLIWithSSL(t *testing.T, sslmode string, args ...string) (string, error) {
 	cfg := getTestConfig()
 
-	// Build base args with connection info but custom sslmode
+	// Build base args with connection info but custom sslmode; the password
+	// goes through the PGPASSWORD environment variable.
 	baseArgs := []string{
-		"-H", cfg.Host,
-		"-P", cfg.Port,
+		"-h", cfg.Host,
+		"-p", cfg.Port,
 		"-U", cfg.User,
 		"-d", cfg.Database,
 		"--sslmode", sslmode, // Override sslmode
-	}
-	if cfg.Password != "" {
-		baseArgs = append(baseArgs, "-W", cfg.Password)
 	}
 
 	allArgs := append(baseArgs, args...)
 
 	cmd := exec.Command("./bin/qwash", allArgs...)
 	cmd.Dir = ".." // Run from project root
+	if cfg.Password != "" {
+		cmd.Env = append(os.Environ(), "PGPASSWORD="+cfg.Password)
+	}
 
 	output, err := cmd.CombinedOutput()
 	return string(output), err

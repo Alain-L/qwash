@@ -4,12 +4,18 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 )
 
-// Config holds PostgreSQL connection parameters
+// Config holds the PostgreSQL connection parameters that were explicitly
+// provided on the command line. Empty fields are omitted from the connection
+// string so that pgx falls back to the standard PostgreSQL client conventions:
+// PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE, PGSSLMODE, ~/.pgpass,
+// service files and libpq-like defaults (local socket, OS user, sslmode
+// prefer, ...).
 type Config struct {
 	Host     string
 	Port     string
@@ -17,6 +23,37 @@ type Config struct {
 	Password string
 	Database string
 	SSLMode  string
+}
+
+// DSN renders the explicitly-set parameters as a libpq key/value connection
+// string. Values are quoted, so passwords or paths containing spaces, quotes
+// or backslashes are passed through correctly.
+func (cfg Config) DSN() string {
+	var parts []string
+	add := func(key, value string) {
+		if value != "" {
+			parts = append(parts, key+"="+quoteDSNValue(value))
+		}
+	}
+	add("host", cfg.Host)
+	add("port", cfg.Port)
+	add("user", cfg.User)
+	add("password", cfg.Password)
+	add("dbname", cfg.Database)
+	add("sslmode", cfg.SSLMode)
+	return strings.Join(parts, " ")
+}
+
+// quoteDSNValue quotes a libpq key/value parameter value. Plain values are
+// returned as-is; values containing spaces, quotes or backslashes are wrapped
+// in single quotes with backslash escaping, as libpq expects.
+func quoteDSNValue(v string) string {
+	if v != "" && !strings.ContainsAny(v, ` '\`) {
+		return v
+	}
+	v = strings.ReplaceAll(v, `\`, `\\`)
+	v = strings.ReplaceAll(v, `'`, `\'`)
+	return "'" + v + "'"
 }
 
 // DB represents a database connection
@@ -40,10 +77,12 @@ func Connect(cfg Config, verbose bool) (*DB, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	connString := fmt.Sprintf("postgresql://%s:%s@%s:%s/%s?sslmode=%s",
-		cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Database, cfg.SSLMode)
+	connConfig, err := pgx.ParseConfig(cfg.DSN())
+	if err != nil {
+		return nil, fmt.Errorf("invalid connection parameters: %w", err)
+	}
 
-	conn, err := pgx.Connect(ctx, connString)
+	conn, err := pgx.ConnectConfig(ctx, connConfig)
 	if err != nil {
 		// Return the error to the caller, which is responsible for logging.
 		// Logging here as well produced a duplicate error line.
@@ -51,10 +90,19 @@ func Connect(cfg Config, verbose bool) (*DB, error) {
 	}
 
 	if verbose {
-		slog.Info("successfully connected", "database", cfg.Database, "host", cfg.Host, "port", cfg.Port)
+		cc := conn.Config()
+		slog.Info("successfully connected",
+			"database", cc.Database, "host", cc.Host, "port", cc.Port, "user", cc.User)
 	}
 
 	return &DB{conn: conn, config: cfg, Verbose: verbose}, nil
+}
+
+// ResolvedTarget describes the live connection as user@host:port/dbname,
+// using the values actually resolved by pgx (flags, environment or defaults).
+func (db *DB) ResolvedTarget() string {
+	cc := db.conn.Config()
+	return fmt.Sprintf("%s@%s:%d/%s", cc.User, cc.Host, cc.Port, cc.Database)
 }
 
 // NewWorkerConnection creates a new connection for a worker goroutine.
