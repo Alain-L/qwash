@@ -20,7 +20,6 @@ DECLARE
     _ctid_list tid[];
     _next_ctid_list tid[];
     _ctid tid;
-    _loop integer;
     _result_page integer;
     _update_query text :=
         'UPDATE ONLY ' || i_table_ident ||
@@ -64,7 +63,10 @@ BEGIN
         END IF;
     END LOOP;
 
-    IF _loop = i_max_tuples_per_page AND _result_page IS NULL THEN
+    -- _result_page is only NULL when the outer loop exhausted all its
+    -- iterations without an EXIT. Note: the FOR loop variable is implicitly
+    -- declared within the loop scope (PL/pgSQL), so it cannot be tested here.
+    IF _result_page IS NULL THEN
         _result_page := -2; -- Max loops reached
     END IF;
 
