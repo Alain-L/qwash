@@ -899,6 +899,23 @@ func processTable(connection *db.DB, table string, bloatPages int) analysis.Debl
 		toPage = 0
 	}
 
+	// Preflight safety checks: surface advisories and refuse unsafe tables
+	// (non-owner -> VACUUM can't reclaim; no usable REPLICA IDENTITY -> UPDATE
+	// would fail). In dry-run we report the blocking reason but keep going so
+	// the estimate is still shown.
+	warnings, preflightErr := connection.DebloatPreflight(table)
+	for _, w := range warnings {
+		slog.Warn(w)
+	}
+	if preflightErr != nil {
+		if dryRunFlag {
+			slog.Warn("debloat would be refused", "table", table, "reason", preflightErr)
+		} else {
+			result.Error = preflightErr.Error()
+			return result
+		}
+	}
+
 	if dryRunFlag {
 		// Dry-run: just show what would happen
 		if verboseFlag {

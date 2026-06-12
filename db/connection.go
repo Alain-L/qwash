@@ -70,6 +70,21 @@ type DB struct {
 	WorkerID int
 	// DelayMs is the delay in milliseconds between operations (--slow mode)
 	DelayMs int
+	// serverVersion caches server_version_num (0 until first lookup)
+	serverVersion int
+}
+
+// ServerVersionNum returns the server's server_version_num (e.g. 180004 for
+// PostgreSQL 18.4), cached after the first lookup. Returns 0 if unavailable.
+func (db *DB) ServerVersionNum() int {
+	if db.serverVersion == 0 {
+		var n int
+		if err := db.conn.QueryRow(context.Background(),
+			"SELECT current_setting('server_version_num')::int").Scan(&n); err == nil {
+			db.serverVersion = n
+		}
+	}
+	return db.serverVersion
 }
 
 // Connect establishes a connection to PostgreSQL and returns a DB struct

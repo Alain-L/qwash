@@ -646,6 +646,85 @@ func (db *DB) GetAllBloatPages() (map[string]int, error) {
 	return result, nil
 }
 
+// DebloatPreflight inspects a (resolved) table for conditions that make
+// compaction unsafe or surprising. A non-nil error means compaction must not
+// proceed; warnings are non-fatal advisories the caller should surface.
+//
+// Hard errors:
+//   - the current role can neither VACUUM the table (not owner, not superuser):
+//     freed pages would never be reclaimed, so compaction would only add bloat;
+//   - the table is in a logical-replication publication but has no usable
+//     REPLICA IDENTITY: the compaction UPDATEs would fail.
+//
+// Warnings:
+//   - ENABLE ALWAYS / ENABLE REPLICA triggers, which fire on every moved row
+//     even under session_replication_role = replica;
+//   - membership in a publication, which makes compaction generate WAL and
+//     logical-replication traffic proportional to the data moved.
+func (db *DB) DebloatPreflight(tableName string) (warnings []string, err error) {
+	ctx := context.Background()
+
+	schemaName, relName := "public", tableName
+	if strings.Contains(tableName, ".") {
+		parts := strings.SplitN(tableName, ".", 2)
+		schemaName, relName = parts[0], parts[1]
+	}
+
+	var (
+		canReclaim      bool
+		ownerName       string
+		alwaysReplTrigs int
+		replIdent       string // 'd' default, 'n' nothing, 'f' full, 'i' index
+		hasPK           bool
+	)
+	err = db.QueryRow(ctx, `
+		SELECT
+		  current_setting('is_superuser')::bool OR pg_has_role(current_user, c.relowner, 'USAGE'),
+		  pg_get_userbyid(c.relowner),
+		  (SELECT count(*) FROM pg_trigger t
+		     WHERE t.tgrelid = c.oid AND NOT t.tgisinternal
+		       AND t.tgenabled IN ('A', 'R')),
+		  c.relreplident::text,
+		  EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid AND i.indisprimary)
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = $1 AND c.relname = $2
+	`, schemaName, relName).Scan(&canReclaim, &ownerName, &alwaysReplTrigs, &replIdent, &hasPK)
+	if err != nil {
+		return nil, fmt.Errorf("failed to run debloat preflight for '%s': %w", tableName, err)
+	}
+
+	if !canReclaim {
+		return nil, fmt.Errorf("the current role can neither own nor superuser-VACUUM '%s' (owned by %q); compaction would move rows but VACUUM could not reclaim the pages, increasing bloat — run as the owner or a superuser",
+			tableName, ownerName)
+	}
+
+	if alwaysReplTrigs > 0 {
+		warnings = append(warnings, fmt.Sprintf("%s has ENABLE ALWAYS/REPLICA trigger(s) that will fire on every moved row", tableName))
+	}
+
+	// Publication membership (logical replication), PostgreSQL 10+ only.
+	if db.ServerVersionNum() >= 100000 {
+		var published bool
+		if e := db.QueryRow(ctx, `
+			SELECT EXISTS (SELECT 1 FROM pg_publication WHERE puballtables)
+			    OR EXISTS (
+			         SELECT 1 FROM pg_publication_rel pr
+			         JOIN pg_class c ON c.oid = pr.prrelid
+			         JOIN pg_namespace n ON n.oid = c.relnamespace
+			         WHERE n.nspname = $1 AND c.relname = $2)
+		`, schemaName, relName).Scan(&published); e == nil && published {
+			// 'd' (default) needs a primary key; 'n' (nothing) is always unusable.
+			if replIdent == "n" || (replIdent == "d" && !hasPK) {
+				return warnings, fmt.Errorf("%s is in a logical-replication publication but has no usable REPLICA IDENTITY; the compaction UPDATEs would fail — set a REPLICA IDENTITY (e.g. a primary key or FULL)", tableName)
+			}
+			warnings = append(warnings, fmt.Sprintf("%s is in a logical-replication publication; compaction will generate WAL and replication traffic proportional to the data moved", tableName))
+		}
+	}
+
+	return warnings, nil
+}
+
 // ListTablesFiltered returns tables filtered by schemas, system flag, and exclusion list.
 // Returned names are schema-qualified ("schema.table"). Exclusions match
 // either the bare table name or its qualified form. All user-provided values
