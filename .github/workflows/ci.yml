@@ -61,10 +61,15 @@ jobs:
   integration-tests:
     runs-on: ubuntu-latest
     needs: lint-and-build
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ['14', '15', '16', '17', '18']
+    name: integration-tests (PG ${{ matrix.postgres }})
 
     services:
       postgres:
-        image: postgres:17
+        image: postgres:${{ matrix.postgres }}
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -96,10 +101,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-
 
-      - name: Build
-        run: go build -o bin/qwash
+      # Build with the race detector so the CLI subprocess tests exercise the
+      # parallel worker pool (only reachable via the binary) under -race.
+      - name: Build (race-instrumented)
+        run: go build -race -o bin/qwash
 
-      - name: Run integration tests
+      - name: Run integration tests (race detector)
         env:
           PGHOST: localhost
           PGPORT: 5432
@@ -107,4 +114,4 @@ jobs:
           PGPASSWORD: postgres
           PGDATABASE: qwash_test
           PGSSLMODE: disable
-        run: go test -v ./tests/... -timeout 10m
+        run: go test -race -v ./tests/... -timeout 15m
