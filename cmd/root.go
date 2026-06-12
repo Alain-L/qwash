@@ -74,6 +74,16 @@ It provides estimation, reporting, and optionally helps remove unnecessary bloat
 	Run: executeAnalysis,
 }
 
+// exitCode is the process exit status, set by the run functions:
+//
+//	0 = success
+//	1 = fatal error (set via fatal(); e.g. bad flags, connection failure)
+//	2 = completed with per-table errors (some tables could not be processed)
+//
+// It is applied in Execute() after the command returns, so that deferred
+// cleanup (connection close) still runs before the process exits.
+var exitCode int
+
 // Execute runs the CLI
 func Execute(version, commit, date string) {
 	rootCmd.Version = fmt.Sprintf("%s (commit: %s, built: %s)", version, commit, date)
@@ -83,6 +93,7 @@ func Execute(version, commit, date string) {
 	if err := rootCmd.Execute(); err != nil {
 		fatal("command failed", "error", err)
 	}
+	os.Exit(exitCode)
 }
 
 // init sets up the CLI flags
@@ -672,6 +683,15 @@ func runDebloat(connection *db.DB) {
 		output.PrintDebloatJSON(results, totalDuration, opts)
 	} else {
 		output.PrintDebloatSummary(results, totalDuration, opts)
+	}
+
+	// Signal per-table failures through the exit code (for automation).
+	// "skipped (limit reached)" is an expected outcome, not a failure.
+	for _, r := range results {
+		if r.Error != "" && r.Error != "skipped (limit reached)" {
+			exitCode = 2
+			break
+		}
 	}
 }
 

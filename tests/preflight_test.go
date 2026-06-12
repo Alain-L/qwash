@@ -2,6 +2,8 @@ package tests
 
 import (
 	"context"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -108,5 +110,43 @@ func TestPreflightAlwaysTriggerWarns(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("Expected an ALWAYS/REPLICA trigger warning, got: %v", warnings)
+	}
+}
+
+// TestCLIExitCodeOnTableFailure verifies that a debloat run in which a table
+// fails (here: refused by the ownership preflight) exits with code 2, so that
+// automation can detect partial failures (previously the exit code was always
+// 0).
+func TestCLIExitCodeOnTableFailure(t *testing.T) {
+	admin := setupTestDB(t)
+	ctx := context.Background()
+	createBloatedTable(t, admin, "exit_owned", 1000, 50)
+	admin.Exec(ctx, "DROP ROLE IF EXISTS qwash_exit_lim")
+	if _, err := admin.Exec(ctx, "CREATE ROLE qwash_exit_lim LOGIN PASSWORD 'lim'"); err != nil {
+		t.Fatalf("Failed to create role: %v", err)
+	}
+	admin.Exec(ctx, "GRANT USAGE ON SCHEMA public TO qwash_exit_lim")
+	admin.Exec(ctx, "GRANT SELECT ON exit_owned TO qwash_exit_lim")
+	defer func() {
+		admin.Exec(ctx, "REVOKE ALL ON exit_owned FROM qwash_exit_lim")
+		admin.Exec(ctx, "REVOKE ALL ON SCHEMA public FROM qwash_exit_lim")
+		admin.Exec(ctx, "DROP ROLE IF EXISTS qwash_exit_lim")
+	}()
+	cfg := getTestConfig()
+	admin.Close()
+
+	cmd := exec.Command("./bin/qwash", "-h", cfg.Host, "-p", cfg.Port,
+		"-U", "qwash_exit_lim", "-d", cfg.Database, "--sslmode", cfg.SSLMode,
+		"--debloat", "-t", "exit_owned")
+	cmd.Dir = ".."
+	cmd.Env = append(os.Environ(), "PGPASSWORD=lim")
+	out, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("Expected a non-zero exit (ExitError), got err=%v\nOutput: %s", err, out)
+	}
+	if code := exitErr.ExitCode(); code != 2 {
+		t.Errorf("Expected exit code 2 for a per-table failure, got %d\nOutput: %s", code, out)
 	}
 }
