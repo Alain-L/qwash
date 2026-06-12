@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- **`--slow --delay` now actually throttles**: the delay was silently ignored, so slow mode ran at full speed while promising minimal production impact
+- **Compaction procedure max-loops bug**: a PL/pgSQL variable scoping issue made the procedure return NULL instead of -2 when a page needed the maximum number of update rounds, aborting the whole table compaction
+- **Bloat estimation filter hardening**: the per-table bloat query now fails fast if the embedded SQL marker is missing (previously it silently ran unfiltered and could target the wrong table) and passes schema/table names as query parameters
+- Conflicting-lock check no longer fails spuriously when the lock holder has no `pg_stat_activity` entry (e.g. prepared transactions)
+- `RESET lock_timeout` instead of `SET lock_timeout = 0`, preserving any server-side configuration
+- pgx error comparisons use `errors.Is` instead of error string matching
+
+### Changed
+- **BREAKING — standard PostgreSQL client conventions**: `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`, `PGSSLMODE` and `~/.pgpass` are now honored; defaults follow libpq (local socket, OS user, `sslmode=prefer`) instead of the hardcoded `postgres@localhost:5432` with `sslmode=disable`
+- **BREAKING — `-h`/`-p` short flags** for host/port (formerly `-H`/`-P`); help is `--help` only, like psql
+- **BREAKING — `-W`/`--password` prompts** for the password interactively (psql semantics) instead of taking it as a command-line argument visible in `ps`
+- **BREAKING — connection flags are single-valued**: `-d`, `-U`, `-h`, `-p` no longer accept repeated values (they silently used only the first one)
+- **BREAKING — `--debloat` requires `-t` or the new `--all` flag**: a bare `qwash --debloat` no longer silently debloats the entire database
+- **`--debloat --toast`/`--btree` is rejected**: only heap debloat is implemented (previously the heap was silently debloated instead)
+- The compaction procedure is created in `pg_temp`: no orphan function left in `public` after an interrupted run, and no CREATE privilege needed
+- `--test-connection` prints the resolved target (`user@host:port/dbname`)
+
+### Added
+- `--all` flag to explicitly debloat every table in the database
+- First unit tests (`db` package: DSN building and quoting) and new integration regression tests (delay throttling, `PG*` environment support, `--all` behavior)
+- CI now also runs on pushes to `dev` and `hardening`
+- README: Operational Caveats section (privileges and table ownership, locks taken, `ENABLE ALWAYS`/`ENABLE REPLICA` triggers, WAL volume and logical replication, connection poolers, statistics freshness)
+
 ## [0.4.0] - 2026-04-26
 
 ### Added
