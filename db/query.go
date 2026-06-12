@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"strings"
@@ -37,10 +38,12 @@ func (db *DB) checkTableLocks(tableName string) error {
 		relName = tableName
 	}
 
-	// Check for conflicting locks (ACCESS EXCLUSIVE, SHARE, SHARE ROW EXCLUSIVE)
+	// Check for conflicting locks (ACCESS EXCLUSIVE, SHARE, SHARE ROW EXCLUSIVE).
+	// Session info columns are coalesced: the LEFT JOIN yields NULLs for lock
+	// holders without a pg_stat_activity entry (e.g. prepared transactions).
 	query := `
-		SELECT l.mode, a.usename, a.application_name,
-		       extract(epoch from (now() - a.query_start))::int as duration_sec
+		SELECT l.mode, coalesce(a.usename, '?'), coalesce(a.application_name, '?'),
+		       coalesce(extract(epoch from (now() - a.query_start))::int, 0) as duration_sec
 		FROM pg_locks l
 		JOIN pg_class c ON l.relation = c.oid
 		JOIN pg_namespace n ON c.relnamespace = n.oid
@@ -60,7 +63,7 @@ func (db *DB) checkTableLocks(tableName string) error {
 		return fmt.Errorf("table '%s' has conflicting lock: %s (held by %s/%s for %ds)",
 			tableName, lockMode, userName, appName, durationSec)
 	}
-	if err.Error() != "no rows in result set" {
+	if !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("failed to check locks: %w", err)
 	}
 
@@ -107,16 +110,17 @@ func (db *DB) checkLongTransactions() (string, error) {
 	return "", nil
 }
 
-// setLockTimeout sets statement_timeout for lock acquisition.
+// setLockTimeout sets lock_timeout for the session.
 // This prevents waiting indefinitely for locks.
 func (db *DB) setLockTimeout(ctx context.Context) error {
 	_, err := db.conn.Exec(ctx, fmt.Sprintf("SET lock_timeout = '%ds'", LockWaitTimeoutSeconds))
 	return err
 }
 
-// resetLockTimeout resets the lock timeout to default.
+// resetLockTimeout restores the lock timeout to its default. RESET (rather
+// than SET ... = 0) preserves any value configured server-side.
 func (db *DB) resetLockTimeout(ctx context.Context) {
-	db.conn.Exec(ctx, "SET lock_timeout = 0")
+	db.conn.Exec(ctx, "RESET lock_timeout")
 }
 
 // Exec executes a query without returning rows.
@@ -235,7 +239,7 @@ func (db *DB) getUpdatableColumn(tableName string) (string, error) {
 	err := db.QueryRow(ctx, query, schemaName, relName).Scan(&columnName)
 
 	// If no non-indexed column found, fall back to any column
-	if err == pgx.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		fallbackQuery := `
 			SELECT a.attname
 			FROM pg_attribute a
@@ -252,7 +256,7 @@ func (db *DB) getUpdatableColumn(tableName string) (string, error) {
 		err = db.QueryRow(ctx, fallbackQuery, schemaName, relName).Scan(&columnName)
 	}
 
-	if err == pgx.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return "", fmt.Errorf("no updatable column found for table '%s'", tableName)
 	}
 	if err != nil {
@@ -337,8 +341,11 @@ func (db *DB) CompactTableUpdate(tableName string) error {
 			initialPages, toPage, bloatPages)
 	}
 
-	// Create stored procedure from embedded SQL
-	procName := fmt.Sprintf("qwash_compact_w%d_%d", db.WorkerID, time.Now().UnixNano())
+	// Create stored procedure from embedded SQL. It lives in pg_temp so it is
+	// dropped automatically with the session: an interrupted run (Ctrl-C,
+	// network loss) leaves no orphan function behind, and no CREATE privilege
+	// on a regular schema is needed.
+	procName := fmt.Sprintf("pg_temp.qwash_compact_w%d_%d", db.WorkerID, time.Now().UnixNano())
 	createProc := fmt.Sprintf(sql.CompactProcedureSQL, procName)
 
 	_, err = db.conn.Exec(ctx, createProc)
@@ -452,25 +459,36 @@ func (db *DB) CompactTableUpdate(tableName string) error {
 func (db *DB) GetBloatPages(tableName string) (int, error) {
 	ctx := context.Background()
 
-	// Handle schema-qualified table names (e.g., "public.mytable")
+	// Handle schema-qualified table names (e.g., "public.mytable").
+	// Values are passed as query parameters, never interpolated.
 	var whereClause string
+	var args []any
 	if strings.Contains(tableName, ".") {
 		parts := strings.SplitN(tableName, ".", 2)
-		whereClause = fmt.Sprintf("WHERE schemaname = '%s' AND tblname = '%s'", parts[0], parts[1])
+		whereClause = "WHERE schemaname = $1 AND tblname = $2"
+		args = []any{parts[0], parts[1]}
 	} else {
-		whereClause = fmt.Sprintf("WHERE tblname = '%s'", tableName)
+		whereClause = "WHERE tblname = $1"
+		args = []any{tableName}
 	}
 
-	// Inject the WHERE clause before the ORDER BY
+	// Inject the WHERE clause before the ORDER BY. The marker must be present
+	// exactly once: a silent no-op Replace (e.g. after an edit of the embedded
+	// SQL) would run the query unfiltered and return the most bloated table of
+	// the whole database instead of the requested one.
+	const orderByMarker = "ORDER BY bloat_pct DESC;"
+	if n := strings.Count(sql.TableBloatSQL, orderByMarker); n != 1 {
+		return 0, fmt.Errorf("embedded table_bloat.sql contains %d occurrence(s) of marker %q (expected 1); refusing to run the bloat query unfiltered", n, orderByMarker)
+	}
 	modifiedQuery := strings.Replace(
 		sql.TableBloatSQL,
-		"ORDER BY bloat_pct DESC;",
-		whereClause+"\nORDER BY bloat_pct DESC;",
+		orderByMarker,
+		whereClause+"\n"+orderByMarker,
 		1,
 	)
 
 	// Run the query
-	row := db.conn.QueryRow(ctx, modifiedQuery)
+	row := db.conn.QueryRow(ctx, modifiedQuery, args...)
 
 	var (
 		_           string // table_name
@@ -498,7 +516,7 @@ func (db *DB) GetBloatPages(tableName string) (int, error) {
 		&bloatPct,   // bloat_pct (nullable)
 	)
 
-	if err == pgx.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, fmt.Errorf("no bloat data found for table '%s'", tableName)
 	}
 	if err != nil {
