@@ -710,6 +710,16 @@ func (db *DB) DebloatPreflight(tableName string) (warnings []string, err error) 
 			tableName, ownerName)
 	}
 
+	// Compaction sets session_replication_role = replica (to suspend triggers
+	// and FK checks for its own session). That parameter requires a superuser
+	// role — or, on PostgreSQL 15+, the SET privilege on it — so owning the
+	// table is not enough. Probe the real capability rather than guessing from
+	// the role flags, then restore the default immediately (no DML runs here).
+	if _, e := db.conn.Exec(ctx, "SET session_replication_role = replica"); e != nil {
+		return warnings, fmt.Errorf("compacting '%s' must set session_replication_role, which requires a superuser role (or the SET privilege on PostgreSQL 15+)", tableName)
+	}
+	_, _ = db.conn.Exec(ctx, "RESET session_replication_role")
+
 	if alwaysReplTrigs > 0 {
 		warnings = append(warnings, fmt.Sprintf("%s has ENABLE ALWAYS/REPLICA trigger(s) that will fire on every moved row", tableName))
 	}

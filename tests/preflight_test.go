@@ -65,6 +65,49 @@ func TestPreflightNonOwnerRefused(t *testing.T) {
 	}
 }
 
+// TestPreflightNonSuperuserOwnerRefused verifies that a non-superuser role
+// that OWNS the table is still refused: compaction sets
+// session_replication_role, which requires superuser (pre-15). Owning the
+// table passes the VACUUM check but not the session_replication_role probe —
+// previously this slipped through and failed mid-compaction.
+func TestPreflightNonSuperuserOwnerRefused(t *testing.T) {
+	admin := setupTestDB(t)
+	ctx := context.Background()
+
+	admin.Exec(ctx, "DROP ROLE IF EXISTS qwash_owner")
+	if _, err := admin.Exec(ctx, "CREATE ROLE qwash_owner LOGIN PASSWORD 'owner'"); err != nil {
+		t.Fatalf("create role failed: %v", err)
+	}
+	admin.Exec(ctx, "GRANT USAGE, CREATE ON SCHEMA public TO qwash_owner")
+	createBloatedTable(t, admin, "owner_tbl", 1000, 50)
+	// Hand ownership to the non-superuser role.
+	admin.Exec(ctx, "ALTER TABLE owner_tbl OWNER TO qwash_owner")
+	admin.Exec(ctx, "ALTER SEQUENCE owner_tbl_id_seq OWNER TO qwash_owner")
+	defer func() {
+		admin.Exec(ctx, "DROP TABLE IF EXISTS owner_tbl")
+		admin.Exec(ctx, "REVOKE ALL ON SCHEMA public FROM qwash_owner")
+		admin.Exec(ctx, "DROP ROLE IF EXISTS qwash_owner")
+		admin.Close()
+	}()
+
+	cfg := getTestConfig()
+	cfg.User = "qwash_owner"
+	cfg.Password = "owner"
+	owner, err := db.Connect(cfg, false)
+	if err != nil {
+		t.Fatalf("connect as owner role failed: %v", err)
+	}
+	defer owner.Close()
+
+	_, err = owner.DebloatPreflight("public.owner_tbl")
+	if err == nil {
+		t.Fatal("Expected preflight to refuse a non-superuser owner, got nil")
+	}
+	if !strings.Contains(err.Error(), "session_replication_role") {
+		t.Errorf("Refusal should mention session_replication_role, got: %v", err)
+	}
+}
+
 // TestPreflightOwnerAllowed verifies the preflight passes for the table owner.
 func TestPreflightOwnerAllowed(t *testing.T) {
 	conn := setupTestDB(t)

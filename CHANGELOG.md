@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **Preflight now verifies the `session_replication_role` privilege**: compaction sets `session_replication_role = replica`, which requires a superuser role (or the `SET` privilege on PostgreSQL 15+). The preflight only checked table ownership, so a non-superuser *owner* passed it and then failed mid-compaction; it now probes the actual capability and refuses up front with a clear message.
 - **TOAST estimate flags stale statistics correctly**: the staleness check used the time since the last VACUUM (which never fired right after a `DELETE`), silently under-reporting freshly created TOAST bloat. It now triggers on un-vacuumed dead tuples (>5% of the table), warning that the estimate understates the reclaimable bloat until `VACUUM` runs.
 - **TOAST estimate no longer lies under reduced privileges**: a role without access to `pg_toast` got a misleading `no chunks` result (suggesting the table was clean); it now reports `insufficient privilege` with a hint, distinct from a genuinely empty TOAST table.
 - **`--system` now works in `--estimate`**: it was silently ignored (system catalogs were never estimated). The heap and B-Tree estimation queries now cover system catalogs (via `pg_stat_all_tables`), and `--system` surfaces them — useful since `pg_catalog` tables bloat with DDL churn. Default output is unchanged (system schemas are still hidden without the flag).
