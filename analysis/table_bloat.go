@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"strings"
 
-	"qwash/db"
-	"qwash/sql"
+	"github.com/Alain-L/qwash/db"
+	"github.com/Alain-L/qwash/sql"
 )
 
 // DetectTableBloat analyzes table bloat in PostgreSQL using the embedded bloat query.

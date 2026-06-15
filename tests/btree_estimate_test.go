@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"qwash/analysis"
-	"qwash/db"
-	"qwash/output"
+	"github.com/Alain-L/qwash/analysis"
+	"github.com/Alain-L/qwash/db"
+	"github.com/Alain-L/qwash/output"
 )
 
 // =============================================================================

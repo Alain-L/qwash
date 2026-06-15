@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"qwash/db"
+	"github.com/Alain-L/qwash/db"
 )
 
 // =============================================================================

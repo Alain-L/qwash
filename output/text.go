@@ -2,7 +2,7 @@ package output
 
 import (
 	"fmt"
-	"qwash/analysis"
+	"github.com/Alain-L/qwash/analysis"
 	"sort"
 )
 

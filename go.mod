@@ -1,4 +1,4 @@
-module qwash
+module github.com/Alain-L/qwash
 
 go 1.24.0
 

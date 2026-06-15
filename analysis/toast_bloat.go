@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"strings"
 
-	"qwash/db"
+	"github.com/Alain-L/qwash/db"
 )
 
 // toastBloatQuery is the main query without the helper function creation.

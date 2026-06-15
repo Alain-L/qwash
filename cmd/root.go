@@ -15,9 +15,9 @@ import (
 	"syscall"
 	"time"
 
-	"qwash/analysis"
-	"qwash/db"
-	"qwash/output"
+	"github.com/Alain-L/qwash/analysis"
+	"github.com/Alain-L/qwash/db"
+	"github.com/Alain-L/qwash/output"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"

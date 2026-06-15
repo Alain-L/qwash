@@ -3,9 +3,9 @@ package output
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/Alain-L/qwash/analysis"
 	"log/slog"
 	"os"
-	"qwash/analysis"
 	"sort"
 	"time"
 )

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"qwash/db"
+	"github.com/Alain-L/qwash/db"
 
 	"github.com/jackc/pgx/v5"
 )

@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"qwash/analysis"
-	"qwash/db"
+	"github.com/Alain-L/qwash/analysis"
+	"github.com/Alain-L/qwash/db"
 )
 
 // =============================================================================

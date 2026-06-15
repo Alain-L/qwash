@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"qwash/sql"
+	"github.com/Alain-L/qwash/sql"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"

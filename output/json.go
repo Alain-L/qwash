@@ -3,8 +3,8 @@ package output
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/Alain-L/qwash/analysis"
 	"log/slog"
-	"qwash/analysis"
 )
 
 // BloatReport represents the JSON output structure.

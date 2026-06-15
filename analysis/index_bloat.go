@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"strings"
 
-	"qwash/db"
+	"github.com/Alain-L/qwash/db"
 )
 
 // btreeBloatQuery estimates B-Tree index bloat using catalog statistics.

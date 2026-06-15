@@ -4,7 +4,7 @@
 package main
 
 import (
-	"qwash/cmd"
+	"github.com/Alain-L/qwash/cmd"
 )
 
 // Version information (set by goreleaser at build time)
