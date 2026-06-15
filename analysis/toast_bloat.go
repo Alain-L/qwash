@@ -25,10 +25,15 @@ toast_stats AS (
     toast.relpages AS toast_pages,
     toast.reltuples::bigint AS toast_chunks,
     (toast.relpages * bs.block_size)::bigint AS toast_bytes,
-    COALESCE(
-      GREATEST(st.last_vacuum, st.last_autovacuum),
-      '1970-01-01'::timestamptz
-    ) < now() - interval '24 hours' AS stale_stats
+    -- Stale when significant DML happened since the last VACUUM: the toast
+    -- table's reltuples/relpages (used below) then still reflect the pre-DML
+    -- state, so the estimate understates the real, reclaimable bloat. Use the
+    -- dead-tuple ratio of the main table (>5%) rather than the vacuum age,
+    -- which never fired right after a DELETE.
+    COALESCE(st.n_dead_tup, 0) > 0
+      AND COALESCE(st.n_dead_tup, 0)::float8
+          / NULLIF(COALESCE(st.n_live_tup, 0) + COALESCE(st.n_dead_tup, 0), 0) > 0.05
+      AS stale_stats
   FROM pg_class main
   JOIN pg_namespace ns ON ns.oid = main.relnamespace
   JOIN pg_class toast ON toast.oid = main.reltoastrelid
@@ -51,10 +56,21 @@ bloat_calc AS (
     toast_bytes,
     stale_stats,
     toast_pages::numeric / NULLIF(toast_chunks, 0) AS ppc,
-    (pg_temp._qwash_sample_chunk_size(main_oid) + 50)::numeric
-      / (SELECT block_size FROM bs) AS ppc_ref,
+    -- Raw average chunk size. The helper returns -1 when it could not read
+    -- pg_toast (insufficient privilege), NULL when the toast table is empty.
+    pg_temp._qwash_sample_chunk_size(main_oid) AS avg_chunk_raw,
     toast_pages >= 10 * 1024 * 1024 / (SELECT block_size FROM bs) AS is_reliable
   FROM toast_stats
+),
+
+ppc_ref_calc AS (
+  SELECT
+    bloat_calc.*,
+    CASE WHEN avg_chunk_raw >= 0
+         THEN (avg_chunk_raw + 50)::numeric / (SELECT block_size FROM bs)
+         ELSE NULL
+    END AS ppc_ref
+  FROM bloat_calc
 )
 
 SELECT
@@ -63,22 +79,21 @@ SELECT
   toast_pages,
   toast_chunks,
   CASE
-    WHEN NOT is_reliable THEN NULL
-    WHEN ppc_ref IS NULL THEN NULL
+    WHEN NOT is_reliable OR ppc_ref IS NULL THEN NULL
     ELSE ROUND(GREATEST(0, (1 - ppc_ref / ppc) * 100)::numeric, 1)
   END AS bloat_pct,
   CASE
-    WHEN NOT is_reliable THEN NULL
-    WHEN ppc_ref IS NULL THEN NULL
+    WHEN NOT is_reliable OR ppc_ref IS NULL THEN NULL
     ELSE (GREATEST(0, (1 - ppc_ref / ppc)) * toast_bytes)::bigint
   END AS bloat_size,
   CASE
     WHEN NOT is_reliable THEN '< 10 MB'
-    WHEN ppc_ref IS NULL THEN 'no chunks'
+    WHEN avg_chunk_raw = -1 THEN 'insufficient privilege'
+    WHEN avg_chunk_raw IS NULL THEN 'no chunks'
     ELSE NULL
   END AS warning,
   stale_stats
-FROM bloat_calc
+FROM ppc_ref_calc
 ORDER BY bloat_pct DESC NULLS LAST, toast_bytes DESC
 `
 
@@ -103,8 +118,13 @@ BEGIN
   ) INTO chunk_size;
 
   RETURN chunk_size;
-EXCEPTION WHEN OTHERS THEN
-  RETURN NULL;
+EXCEPTION
+  WHEN insufficient_privilege THEN
+    -- The caller cannot read pg_toast (not the table owner / not superuser).
+    -- Signal it distinctly so we don't report a misleading "no chunks".
+    RETURN -1;
+  WHEN OTHERS THEN
+    RETURN NULL;
 END;
 $$ LANGUAGE plpgsql
 `

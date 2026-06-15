@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **TOAST estimate flags stale statistics correctly**: the staleness check used the time since the last VACUUM (which never fired right after a `DELETE`), silently under-reporting freshly created TOAST bloat. It now triggers on un-vacuumed dead tuples (>5% of the table), warning that the estimate understates the reclaimable bloat until `VACUUM` runs.
+- **TOAST estimate no longer lies under reduced privileges**: a role without access to `pg_toast` got a misleading `no chunks` result (suggesting the table was clean); it now reports `insufficient privilege` with a hint, distinct from a genuinely empty TOAST table.
 - **`--system` now works in `--estimate`**: it was silently ignored (system catalogs were never estimated). The heap and B-Tree estimation queries now cover system catalogs (via `pg_stat_all_tables`), and `--system` surfaces them — useful since `pg_catalog` tables bloat with DDL churn. Default output is unchanged (system schemas are still hidden without the flag).
 - **`--limit`: skipped tables are no longer reported as errors**: tables left untouched because the limit was reached now appear in a `SKIPPED (limit reached)` section (not `ERRORS`), are counted separately from failures, and reported consistently in sequential and parallel modes. JSON gains a `summary.skipped` count and a `skipped` flag per result (instead of an `error` string).
 - **Never-analyzed tables are surfaced, not hidden**: a table with stale/missing statistics (never analyzed) used to be silently reported as bloat-free; it now appears in a `NOT ESTIMATED (stale statistics)` section with a hint to run `ANALYZE`, and is flagged `stale_stats` in JSON.

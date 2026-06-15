@@ -543,8 +543,8 @@ func PrintToastBloatSummary(toastBloat []analysis.ToastBloat) {
 
 	// Stale stats footnote
 	if hasStaleStats {
-		fmt.Println("  * No VACUUM in the last 24 hours — pg_class stats may be stale.")
-		fmt.Println("    Run VACUUM on these tables for accurate TOAST bloat estimation.")
+		fmt.Println("  * Dead tuples since the last VACUUM — the estimate may understate bloat.")
+		fmt.Println("    Run VACUUM on these tables for an accurate figure.")
 		fmt.Println()
 	}
 
@@ -625,6 +625,9 @@ func PrintDetailedToastBloat(toastData []analysis.ToastBloat) {
 		if tb.BloatPct != nil {
 			fmt.Printf("  Bloat       : %s\n", FormatSize(tb.BloatSize))
 			fmt.Printf("  Bloat %%     : %.2f%%\n", *tb.BloatPct)
+		} else if tb.Warning == "insufficient privilege" {
+			fmt.Printf("  Bloat       : not estimated (insufficient privilege)\n")
+			fmt.Printf("  Hint        : reading pg_toast needs table ownership or superuser\n")
 		} else if tb.Warning == "no chunks" {
 			fmt.Printf("  Bloat       : N/A (no chunks)\n")
 			fmt.Printf("  Bloat %%     : -\n")
@@ -636,7 +639,8 @@ func PrintDetailedToastBloat(toastData []analysis.ToastBloat) {
 		fmt.Printf("  Pages       : %d\n", tb.ToastPages)
 		fmt.Printf("  Chunks      : %d\n", tb.ToastChunks)
 		if tb.StaleStats {
-			fmt.Printf("  Warning     : no VACUUM in the last 24h, stats may be stale\n")
+			fmt.Printf("  Warning     : dead tuples since last VACUUM — estimate may understate\n")
+			fmt.Printf("                bloat; run VACUUM %s for an accurate figure\n", tableName)
 		}
 		fmt.Println()
 
