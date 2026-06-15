@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 var ctx = context.Background()
@@ -119,6 +120,51 @@ func TestEstimateSystemFlag(t *testing.T) {
 	}
 	if c := countCatalog(sys); c == 0 {
 		t.Errorf("--estimate --system should include pg_catalog tables, found none")
+	}
+}
+
+// TestEstimateStaleAfterChurn verifies that a table analyzed and THEN heavily
+// modified without a subsequent VACUUM is flagged stale — its reltuples no
+// longer matches reality, so the bloat estimate is wrong (a dangerous false
+// negative: ~0% reported when the real reclaimable bloat is large).
+func TestEstimateStaleAfterChurn(t *testing.T) {
+	conn := setupTestDB(t)
+	c := context.Background()
+	// Fresh stats first, then delete 70% WITHOUT re-vacuuming.
+	if _, err := conn.Exec(c, `
+		CREATE TABLE churn_demo (id serial primary key, v text) WITH (autovacuum_enabled = false);
+		INSERT INTO churn_demo (v) SELECT repeat('x', 100) FROM generate_series(1, 20000);
+		ANALYZE churn_demo;
+		DELETE FROM churn_demo WHERE id % 10 < 7;
+	`); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	conn.Close()
+
+	// n_dead_tup propagates asynchronously before PostgreSQL 15; poll until
+	// the flag fires (mirrors real use — it appears within ~1s of the DML).
+	var stale bool
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		out, err := runQwashCLI(t, "--estimate", "-t", "churn_demo", "--json")
+		if err != nil {
+			t.Fatalf("CLI failed: %v\nOutput: %s", err, out)
+		}
+		var result EstimateJSON
+		if err := json.Unmarshal([]byte(out), &result); err != nil {
+			t.Fatalf("Failed to parse JSON: %v\nOutput: %s", err, out)
+		}
+		if len(result.Tables) == 1 && result.Tables[0].StaleStats {
+			stale = true
+			break
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if !stale {
+		t.Errorf("Churned table (un-vacuumed deletes) must be flagged stale_stats=true")
 	}
 }
 

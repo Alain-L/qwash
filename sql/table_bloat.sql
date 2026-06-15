@@ -157,12 +157,20 @@ SELECT
      / NULLIF(actual_pages, 0)
     )::numeric, 2
   ) AS bloat_pct,
-  -- Stale/missing statistics: the row count is unknown (reltuples < 0) or the
-  -- catalog reports 0 pages while the table actually holds data on disk
-  -- (relpages not yet updated by ANALYZE/VACUUM). The estimate is unusable.
+  -- Stale/missing statistics: the estimate is driven by reltuples/relpages,
+  -- which only VACUUM/ANALYZE refresh. It is unusable when:
+  --   * the row count is unknown (reltuples < 0, never analyzed), or
+  --   * the catalog reports 0 pages while the table holds data on disk, or
+  --   * many dead tuples have accumulated since the last VACUUM (>5% of the
+  --     table) — a DELETE/UPDATE-heavy table whose reltuples no longer matches
+  --     reality, so the bloat would be badly under- or over-estimated.
+  -- n_dead_tup is the same signal autovacuum uses to decide a VACUUM is due.
   (reltuples < 0
    OR (actual_pages = 0
        AND pg_relation_size(format('%I.%I', schemaname, tblname)::regclass) > 0)
+   OR (COALESCE(n_dead_tup, 0) > 0
+       AND COALESCE(n_dead_tup, 0)::float8
+           / NULLIF(COALESCE(n_live_tup, 0) + COALESCE(n_dead_tup, 0), 0) > 0.05)
   ) AS stale_stats
 FROM bloat_estimation
 ORDER BY bloat_pct DESC;

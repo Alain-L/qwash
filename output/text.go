@@ -180,8 +180,9 @@ func PrintBloatSummary(tableBloat []analysis.BloatTable, indexBloat []analysis.B
 			fmt.Printf("  %-40s %12s\n", tableName, FormatSize(tbl.TableSize))
 		}
 		fmt.Println()
-		fmt.Println("  These tables were never analyzed; their bloat cannot be estimated.")
-		fmt.Println("  Run ANALYZE (or VACUUM ANALYZE) on them, then re-run qwash.")
+		fmt.Println("  Statistics are stale or missing (never analyzed, or many dead")
+		fmt.Println("  tuples since the last VACUUM); their bloat cannot be estimated.")
+		fmt.Println("  Run VACUUM ANALYZE on them, then re-run qwash.")
 		fmt.Println()
 	}
 
@@ -251,7 +252,7 @@ func PrintDetailedBloat(tables []analysis.BloatTable) {
 		if tbl.StaleStats {
 			fmt.Printf("  Size        : %s\n", FormatSize(tbl.TableSize))
 			fmt.Printf("  Bloat       : not estimated (stale statistics)\n")
-			fmt.Printf("  Hint        : run ANALYZE %s, then re-run qwash\n", tableName)
+			fmt.Printf("  Hint        : run VACUUM ANALYZE %s, then re-run qwash\n", tableName)
 			fmt.Println()
 			if i < len(tables)-1 {
 				fmt.Println("  ---")

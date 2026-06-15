@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **Heap estimate detects stale statistics after un-vacuumed churn**: the staleness check only caught never-analyzed tables; a table analyzed and then heavily DELETE/UPDATE'd without a subsequent VACUUM kept stale `reltuples`, so qwash reported near-zero bloat on a heavily bloated table (e.g. 0.6% vs ~65% reclaimable). It now also flags tables with many dead tuples since the last VACUUM (`n_dead_tup` > 5%, the signal autovacuum itself uses) as `NOT ESTIMATED (stale statistics)`. Freshly vacuumed tables are unaffected.
+- **`-D`/`--detail` help no longer overstates**: the flag is a no-op, now marked `(not yet implemented)` in `--help` to match the README.
 - **Preflight now verifies the `session_replication_role` privilege**: compaction sets `session_replication_role = replica`, which requires a superuser role (or the `SET` privilege on PostgreSQL 15+). The preflight only checked table ownership, so a non-superuser *owner* passed it and then failed mid-compaction; it now probes the actual capability and refuses up front with a clear message.
 - **TOAST estimate flags stale statistics correctly**: the staleness check used the time since the last VACUUM (which never fired right after a `DELETE`), silently under-reporting freshly created TOAST bloat. It now triggers on un-vacuumed dead tuples (>5% of the table), warning that the estimate understates the reclaimable bloat until `VACUUM` runs.
 - **TOAST estimate no longer lies under reduced privileges**: a role without access to `pg_toast` got a misleading `no chunks` result (suggesting the table was clean); it now reports `insufficient privilege` with a hint, distinct from a genuinely empty TOAST table.

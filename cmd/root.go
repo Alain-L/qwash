@@ -140,7 +140,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVarP(&estimateFlag, "estimate", "E", false,
 		"Display a report of estimated bloat")
 	rootCmd.PersistentFlags().BoolVarP(&detailFlag, "detail", "D", false,
-		"Show detailed bloat analysis per table and index")
+		"Show detailed bloat analysis per table and index (not yet implemented)")
 	rootCmd.PersistentFlags().BoolVar(&heapFlag, "heap", false,
 		"Analyze heap bloat (default if no --heap, --toast or --btree specified)")
 	rootCmd.PersistentFlags().BoolVar(&toastFlag, "toast", false,
