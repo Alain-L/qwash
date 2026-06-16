@@ -4,51 +4,34 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [0.5.0] - 2026-06-16
+## [0.5.0] - 2026-06-17
 
-### Fixed
-- **Heap estimate detects stale statistics after un-vacuumed churn**: the staleness check only caught never-analyzed tables; a table analyzed and then heavily DELETE/UPDATE'd without a subsequent VACUUM kept stale `reltuples`, so qwash reported near-zero bloat on a heavily bloated table (e.g. 0.6% vs ~65% reclaimable). It now also flags tables with many dead tuples since the last VACUUM (`n_dead_tup` > 5%, the signal autovacuum itself uses) as `NOT ESTIMATED (stale statistics)`. Freshly vacuumed tables are unaffected.
-- **`-D`/`--detail` help no longer overstates**: the flag is a no-op, now marked `(not yet implemented)` in `--help` to match the README.
-- **Preflight now verifies the `session_replication_role` privilege**: compaction sets `session_replication_role = replica`, which requires a superuser role (or the `SET` privilege on PostgreSQL 15+). The preflight only checked table ownership, so a non-superuser *owner* passed it and then failed mid-compaction; it now probes the actual capability and refuses up front with a clear message.
-- **TOAST estimate flags stale statistics correctly**: the staleness check used the time since the last VACUUM (which never fired right after a `DELETE`), silently under-reporting freshly created TOAST bloat. It now triggers on un-vacuumed dead tuples (>5% of the table), warning that the estimate understates the reclaimable bloat until `VACUUM` runs.
-- **TOAST estimate no longer lies under reduced privileges**: a role without access to `pg_toast` got a misleading `no chunks` result (suggesting the table was clean); it now reports `insufficient privilege` with a hint, distinct from a genuinely empty TOAST table.
-- **`--system` now works in `--estimate`**: it was silently ignored (system catalogs were never estimated). The heap and B-Tree estimation queries now cover system catalogs (via `pg_stat_all_tables`), and `--system` surfaces them — useful since `pg_catalog` tables bloat with DDL churn. Default output is unchanged (system schemas are still hidden without the flag).
-- **`--limit`: skipped tables are no longer reported as errors**: tables left untouched because the limit was reached now appear in a `SKIPPED (limit reached)` section (not `ERRORS`), are counted separately from failures, and reported consistently in sequential and parallel modes. JSON gains a `summary.skipped` count and a `skipped` flag per result (instead of an `error` string).
-- **Never-analyzed tables are surfaced, not hidden**: a table with stale/missing statistics (never analyzed) used to be silently reported as bloat-free; it now appears in a `NOT ESTIMATED (stale statistics)` section with a hint to run `ANALYZE`, and is flagged `stale_stats` in JSON.
-- **B-Tree indexes without column statistics are no longer dropped**: the index bloat query used an `INNER JOIN` on `pg_stats`, silently omitting indexes whose key column had no statistics; they are now listed and flagged `is_na` (unreliable).
-- **Preflight safety checks before compaction**: a table is now refused (and the run continues with the others) when the current role can neither own nor superuser-VACUUM it — previously the UPDATEs ran but VACUUM silently reclaimed nothing, *increasing* bloat — or when it is in a logical-replication publication without a usable REPLICA IDENTITY (the UPDATEs would fail). `ENABLE ALWAYS`/`REPLICA` triggers and publication membership are surfaced as warnings.
-- **Clean cancellation on Ctrl-C (SIGINT/SIGTERM)**: long debloat/estimate runs stop promptly between tables and between page rounds instead of being killed mid-statement; each page is its own transaction, so the table stays consistent.
-- **`--reindex` never silently blocks**: it no longer falls back to a blocking `REINDEX TABLE` when `REINDEX CONCURRENTLY` fails (or on PostgreSQL < 12); it refuses or reports the failure, and cleans up the transient invalid `*_ccnew`/`*_ccold` indexes left behind.
-- **Exact byte sizes**: the table report and JSON no longer round-trip sizes through `pg_size_pretty` and back, which drifted by up to half the displayed unit per table; sizes are now exact to the byte
-- **Bloat query runs once per debloat**: the catalog-wide estimation used to run once per table and again per compaction pass (≈3N+ scans, quadratic on large databases); it now runs a single time and results are looked up from a map
-- **`--slow --delay` now actually throttles**: the delay was silently ignored, so slow mode ran at full speed while promising minimal production impact
-- **Compaction procedure max-loops bug**: a PL/pgSQL variable scoping issue made the procedure return NULL instead of -2 when a page needed the maximum number of update rounds, aborting the whole table compaction
-- **Bloat estimation filter hardening**: the per-table bloat query now fails fast if the embedded SQL marker is missing (previously it silently ran unfiltered and could target the wrong table) and passes schema/table names as query parameters
-- **`--schema` and `--exclude-table` are now honored in `--estimate` mode**: they were silently ignored (the report covered the whole database while claiming to filter)
-- **Homonym tables are targeted unambiguously**: table names are resolved once to their canonical `schema.table` form (search_path rules); previously the bloat estimation could match a same-named table in another schema than the one actually compacted, and the anti-concurrency advisory lock keyed on the raw name (`orders` and `public.orders` did not collide)
-- Conflicting-lock check no longer fails spuriously when the lock holder has no `pg_stat_activity` entry (e.g. prepared transactions)
-- `RESET lock_timeout` instead of `SET lock_timeout = 0`, preserving any server-side configuration
-- pgx error comparisons use `errors.Is` instead of error string matching
+> Full commit list on the GitHub release page.
 
-### Changed
-- **BREAKING — standard PostgreSQL client conventions**: `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`, `PGSSLMODE` and `~/.pgpass` are now honored; defaults follow libpq (local socket, OS user, `sslmode=prefer`) instead of the hardcoded `postgres@localhost:5432` with `sslmode=disable`
-- **BREAKING — `-h`/`-p` short flags** for host/port (formerly `-H`/`-P`); help is `--help` only, like psql
-- **BREAKING — `-W`/`--password` prompts** for the password interactively (psql semantics) instead of taking it as a command-line argument visible in `ps`
-- **BREAKING — connection flags are single-valued**: `-d`, `-U`, `-h`, `-p` no longer accept repeated values (they silently used only the first one)
-- **BREAKING — `--debloat` requires `-t` or the new `--all` flag**: a bare `qwash --debloat` no longer silently debloats the entire database
-- **`--debloat --toast`/`--btree` is rejected**: only heap debloat is implemented (previously the heap was silently debloated instead)
-- The compaction procedure is created in `pg_temp`: no orphan function left in `public` after an interrupted run, and no CREATE privilege needed
-- `--test-connection` prints the resolved target (`user@host:port/dbname`)
-- Debloat results report schema-qualified table names (`public.orders` instead of `orders`)
-- `--debloat -t unknown_table` fails fast with a clear error instead of reporting a confusing per-table failure
-- `--exclude-table` accepts schema-qualified names (`-X staging.orders`)
+### Changed (breaking)
+- Connection follows libpq: `PG*` env vars and `~/.pgpass` honored; libpq defaults (was `postgres@localhost:5432`).
+- `-h`/`-p` for host/port (were `-H`/`-P`); `-W` prompts (was a value); connection flags single-valued.
+- `--debloat` requires `-t` or `--all`; `--debloat --toast`/`--btree` rejected.
 
 ### Added
-- **Exit codes** for automation: `0` success, `1` fatal error, `2` completed with per-table failures
-- `--all` flag to explicitly debloat every table in the database
-- First unit tests (`db` package: DSN building and quoting) and new integration regression tests (delay throttling, `PG*` environment support, `--all` behavior)
-- CI now also runs on pushes to `dev` and `hardening`
-- README: Operational Caveats section (privileges and table ownership, locks taken, `ENABLE ALWAYS`/`ENABLE REPLICA` triggers, WAL volume and logical replication, connection poolers, statistics freshness)
+- Exit codes (`0`/`1`/`2`) for automation.
+- `--all` flag.
+- Working `--system` (estimates `pg_catalog` tables).
+- Preflight safety checks before compaction (ownership / `session_replication_role` / REPLICA IDENTITY; warns on `ENABLE ALWAYS` triggers and publications).
+- Clean Ctrl-C cancellation.
+- `--reindex` never falls back to a blocking REINDEX.
+- `go install github.com/Alain-L/qwash@latest` (full module path).
+- README: Operational Caveats section.
+- First unit tests; CI on PostgreSQL 14-18 with the race detector.
+
+### Fixed
+- Never-analyzed, churned, and privilege-blocked tables flagged, not reported bloat-free (heap & TOAST).
+- B-Tree indexes without column stats are listed (were silently dropped).
+- Byte-exact sizes (no `pg_size_pretty` round-trip).
+- Bloat query runs once per debloat (was per table and per pass).
+- Schema-qualified targeting; `--schema`/`--exclude-table` honored in `--estimate`.
+- `--slow --delay` actually throttles; `--limit` skips reported as skipped, not errors.
+- PL/pgSQL scoping bug that could abort a table's compaction.
 
 ## [0.4.0] - 2026-04-26
 
