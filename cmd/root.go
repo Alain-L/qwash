@@ -70,7 +70,7 @@ var (
 // rootCmd is the main command for qwash
 var rootCmd = &cobra.Command{
 	Use:   "qwash",
-	Short: "qwash is a PostgreSQL bloat analysis and reduction tool",
+	Short: "A no-dependency PostgreSQL introspection & maintenance CLI (table, index & TOAST bloat)",
 	Long: `qwash analyzes PostgreSQL catalogs to detect table and index bloat.
 It provides estimation, reporting, and optionally helps remove unnecessary bloat without downtime.`,
 	Run: executeAnalysis,

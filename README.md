@@ -1,6 +1,6 @@
 # qwash
 
-**qwash** is a PostgreSQL bloat analysis and reduction tool. It identifies and reduces table bloat **using regular DML operations** instead of a long exclusive lock (unlike `VACUUM FULL`), making it suitable for production use (see [Operational Caveats](#operational-caveats)).
+**qwash** is a single-binary PostgreSQL introspection & maintenance CLI — no extensions required. It detects and safely reduces table, index, and TOAST bloat **using regular DML operations** instead of a long exclusive lock (unlike `VACUUM FULL`), making it suitable for production use (see [Operational Caveats](#operational-caveats)).
 
 qwash is a **standalone tool** that combines bloat estimation and reduction in a single binary:
 - **No extensions required** — works with any PostgreSQL 9.6+ installation
