@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-16
+
 ### Fixed
 - **Heap estimate detects stale statistics after un-vacuumed churn**: the staleness check only caught never-analyzed tables; a table analyzed and then heavily DELETE/UPDATE'd without a subsequent VACUUM kept stale `reltuples`, so qwash reported near-zero bloat on a heavily bloated table (e.g. 0.6% vs ~65% reclaimable). It now also flags tables with many dead tuples since the last VACUUM (`n_dead_tup` > 5%, the signal autovacuum itself uses) as `NOT ESTIMATED (stale statistics)`. Freshly vacuumed tables are unaffected.
 - **`-D`/`--detail` help no longer overstates**: the flag is a no-op, now marked `(not yet implemented)` in `--help` to match the README.
