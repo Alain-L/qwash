@@ -96,7 +96,7 @@ Format des items : `- [ ] **Titre** · Px · ~effort` + pitch + Action + Synergi
 
 ## Dette technique différée (du hardening, non bloquante)
 
-- [ ] **`go test ./...` autonome** · P1 · ~petit — un `TestMain` qui build `bin/qwash` + `t.Skip` propre si pas de PostgreSQL ; aujourd'hui la suite exige un binaire pré-buildé et une instance vivante (piège local, masqué par la CI). *Filet à poser avant la grosse refonte CLI.*
+- [x] **Test autonome depuis un clone propre** · P1 — ✅ `Makefile` ajouté (`make test-db` monte un PostgreSQL jetable, lance la suite, nettoie ; `make test`/`make lint` reproduisent la CI). Reste optionnel : un `TestMain` qui build `bin/qwash` + `t.Skip` propre si pas de PG, pour rendre `go test ./...` autonome *sans* passer par make.
 - [ ] **Propager le `ctx` annulable** · P2 · ~moyen — plusieurs requêtes catalogue/verrou (`ListDatabases`, `acquireTableLock`, helpers) tournent encore sur `context.Background()` ; l'annulation Ctrl-C n'atteint que la boucle de compaction.
 - [ ] **Triggers `ENABLE ALWAYS`/`REPLICA`** · P2 — actuellement avertis mais non bloqués pendant `repack` (se déclenchent sur chaque ligne déplacée). Option de confirmation/refus.
 - [ ] **Ménage repo** · P2 — branches mortes (`feature/btree_bloat`, `feature/gin_bloat`), fichiers `_*` locaux (`db/_query_bench_test.go` casse + référence l'ancien module path), commentaire faux sur `ListTables`.

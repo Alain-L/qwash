@@ -49,9 +49,15 @@ GitHub. Include as much detail as possible:
 ## Additional Notes
 
 - **Testing:**
-  Before submitting a PR, ensure all tests pass:
+  The integration tests need a reachable PostgreSQL. The simplest way, from a
+  clean clone, is a throwaway container:
   ```sh
-  go test ./...
+  make test-db      # spins up PostgreSQL, runs the suite, tears it down
+  ```
+  Or against your own instance (via the standard PG* variables):
+  ```sh
+  make test         # builds the binary first, then `go test ./...`
+  make lint         # gofmt -s, go vet, staticcheck (the CI gates)
   ```
 - **Documentation:**
   If your changes impact usage, update the documentation accordingly.
