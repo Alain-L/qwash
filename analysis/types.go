@@ -11,6 +11,9 @@ type DebloatResult struct {
 	Reindexed         bool   `json:"reindexed,omitempty"`
 	Error             string `json:"error,omitempty"`
 	DryRun            bool   `json:"dry_run,omitempty"`
+	// Skipped marks a table that was not processed because the --limit was
+	// reached. It is an expected outcome, distinct from an error.
+	Skipped bool `json:"skipped,omitempty"`
 }
 
 // BloatIndex represents bloat information for a B-Tree index.
@@ -42,6 +45,9 @@ type BloatTable struct {
 	LiveTuples int64 `json:"live_tuples"`
 	DeadTuples int64 `json:"dead_tuples"`
 	FillFactor int   `json:"fill_factor"`
+	// StaleStats is true when statistics are missing/stale (never analyzed),
+	// so the bloat estimate is unusable and the table needs ANALYZE.
+	StaleStats bool `json:"stale_stats,omitempty"`
 }
 
 // ToastBloat represents bloat information for a TOAST table.
@@ -52,8 +58,8 @@ type ToastBloat struct {
 	ToastSize   int64    `json:"toast_size"`
 	ToastPages  int      `json:"toast_pages"`
 	ToastChunks int64    `json:"toast_chunks"`
-	BloatPct    *float64 `json:"bloat_pct,omitempty"`  // nil if < 10 MB or no ppc_ref
-	BloatSize   int64    `json:"bloat_size,omitempty"` // 0 if unreliable
-	Warning     string   `json:"warning,omitempty"`    // "< 10 MB" or "no chunks"
+	BloatPct    *float64 `json:"bloat_pct,omitempty"`   // nil if < 10 MB or no ppc_ref
+	BloatSize   int64    `json:"bloat_size,omitempty"`  // 0 if unreliable
+	Warning     string   `json:"warning,omitempty"`     // "< 10 MB" or "no chunks"
 	StaleStats  bool     `json:"stale_stats,omitempty"` // true if no VACUUM in last 24h
 }

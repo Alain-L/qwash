@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+## [0.5.0] - 2026-06-17
+
+> Full commit list on the GitHub release page.
+
+### Changed (breaking)
+- Connection follows libpq: `PG*` env vars and `~/.pgpass` honored; libpq defaults (was `postgres@localhost:5432`).
+- `-h`/`-p` for host/port (were `-H`/`-P`); `-W` prompts (was a value); connection flags single-valued.
+- `--debloat` requires `-t` or `--all`; `--debloat --toast`/`--btree` rejected.
+
+### Added
+- Exit codes (`0`/`1`/`2`) for automation.
+- `--all` flag.
+- Working `--system` (estimates `pg_catalog` tables).
+- Preflight safety checks before compaction (ownership / `session_replication_role` / REPLICA IDENTITY; warns on `ENABLE ALWAYS` triggers and publications).
+- Clean Ctrl-C cancellation.
+- `--reindex` never falls back to a blocking REINDEX.
+- `go install github.com/Alain-L/qwash@latest` (full module path).
+- README: Operational Caveats section.
+- First unit tests; CI on PostgreSQL 14-18 with the race detector.
+
+### Fixed
+- Never-analyzed, churned, and privilege-blocked tables flagged, not reported bloat-free (heap & TOAST).
+- B-Tree indexes without column stats are listed (were silently dropped).
+- Byte-exact sizes (no `pg_size_pretty` round-trip).
+- Bloat query runs once per debloat (was per table and per pass).
+- Schema-qualified targeting; `--schema`/`--exclude-table` honored in `--estimate`.
+- `--slow --delay` actually throttles; `--limit` skips reported as skipped, not errors.
+- PL/pgSQL scoping bug that could abort a table's compaction.
+
 ## [0.4.0] - 2026-04-26
 
 ### Added

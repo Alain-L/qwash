@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"qwash/analysis"
-	"qwash/db"
-	"qwash/output"
+	"github.com/Alain-L/qwash/analysis"
+	"github.com/Alain-L/qwash/db"
+	"github.com/Alain-L/qwash/output"
 )
 
 // =============================================================================
@@ -328,6 +328,39 @@ func TestBtreeEstimateJSON(t *testing.T) {
 // =============================================================================
 
 // findIndexResult finds a BloatIndex result by index name
+// TestBtreeIndexWithoutStatsSurfaced verifies that an index whose key column
+// has no statistics is still reported (flagged is_na), instead of being
+// silently dropped by an INNER JOIN on pg_stats (the pre-F3 behavior).
+func TestBtreeIndexWithoutStatsSurfaced(t *testing.T) {
+	conn := setupTestDB(t)
+	defer conn.Close()
+	ctx := context.Background()
+
+	// SET STATISTICS 0 makes ANALYZE store no pg_stats row for column k.
+	if _, err := conn.Exec(ctx, `
+		CREATE TABLE nostats_idx (id serial primary key, k int) WITH (autovacuum_enabled = false);
+		INSERT INTO nostats_idx (k) SELECT g % 500 FROM generate_series(1, 8000) g;
+		ALTER TABLE nostats_idx ALTER COLUMN k SET STATISTICS 0;
+		CREATE INDEX nostats_idx_k ON nostats_idx (k);
+		ANALYZE nostats_idx;
+	`); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+
+	results, err := analysis.DetectBtreeIndexBloat(ctx, conn)
+	if err != nil {
+		t.Fatalf("DetectBtreeIndexBloat failed: %v", err)
+	}
+
+	idx := findIndexResult(t, results, "nostats_idx_k")
+	if idx == nil {
+		t.Fatal("Index nostats_idx_k is missing from the report (silently dropped)")
+	}
+	if !idx.IsNA {
+		t.Errorf("Index with no column statistics should be flagged is_na, got is_na=false")
+	}
+}
+
 func findIndexResult(t *testing.T, results []analysis.BloatIndex, indexName string) *analysis.BloatIndex {
 	t.Helper()
 	for i, r := range results {

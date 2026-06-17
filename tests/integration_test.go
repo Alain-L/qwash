@@ -2,13 +2,15 @@ package tests
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
-	"qwash/db"
+	"github.com/Alain-L/qwash/db"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -193,24 +195,55 @@ func getTablePages(t *testing.T, conn *db.DB, tableName string) int {
 func runQwashCLI(t *testing.T, args ...string) (string, error) {
 	cfg := getTestConfig()
 
-	// Build base args with connection info
+	// Build base args with connection info; the password goes through the
+	// PGPASSWORD environment variable, like any PostgreSQL client.
 	baseArgs := []string{
-		"-H", cfg.Host,
-		"-P", cfg.Port,
+		"-h", cfg.Host,
+		"-p", cfg.Port,
 		"-U", cfg.User,
 		"-d", cfg.Database,
 		"--sslmode", cfg.SSLMode,
-	}
-	if cfg.Password != "" {
-		baseArgs = append(baseArgs, "-W", cfg.Password)
 	}
 
 	allArgs := append(baseArgs, args...)
 	cmd := exec.Command("./bin/qwash", allArgs...)
 	cmd.Dir = ".." // Run from project root
+	if cfg.Password != "" {
+		cmd.Env = append(os.Environ(), "PGPASSWORD="+cfg.Password)
+	}
 
 	output, err := cmd.CombinedOutput()
 	return string(output), err
+}
+
+// TestCLIConnectionFromEnvironment verifies that the binary follows the
+// standard PostgreSQL client conventions: PG* environment variables are
+// honored when no connection flag is given (regression test: they used to
+// be silently ignored in favor of hardcoded defaults).
+func TestCLIConnectionFromEnvironment(t *testing.T) {
+	setupTestDB(t).Close()
+	cfg := getTestConfig()
+
+	cmd := exec.Command("./bin/qwash", "-T")
+	cmd.Dir = ".." // Run from project root
+	// Duplicate keys in exec.Cmd.Env resolve to the last value, so these
+	// override any PG* variables already present in the test environment.
+	cmd.Env = append(os.Environ(),
+		"PGHOST="+cfg.Host,
+		"PGPORT="+cfg.Port,
+		"PGUSER="+cfg.User,
+		"PGPASSWORD="+cfg.Password,
+		"PGDATABASE="+cfg.Database,
+		"PGSSLMODE="+cfg.SSLMode,
+	)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Expected PG* environment to be honored: %v\nOutput: %s", err, out)
+	}
+	if !strings.Contains(string(out), "Connection OK") {
+		t.Errorf("Expected 'Connection OK' in output\nOutput: %s", out)
+	}
 }
 
 // =============================================================================
@@ -397,6 +430,40 @@ func TestDebloatSlowWithDelay(t *testing.T) {
 	if finalPages >= initialPages {
 		t.Errorf("Expected page count to decrease: initial=%d, final=%d", initialPages, finalPages)
 	}
+}
+
+// TestDelayActuallyThrottles verifies that DelayMs introduces a real pause
+// between page rounds (regression test: DelayMs used to be silently ignored,
+// so --slow --delay ran at full speed).
+func TestDelayActuallyThrottles(t *testing.T) {
+	conn := setupTestDB(t)
+	defer conn.Close()
+
+	tableName := "test_delay_throttle"
+	createBloatedTable(t, conn, tableName, 2000, 50)
+
+	bloatPages := getBloatPages(t, conn, tableName)
+	if bloatPages < 5 {
+		t.Skip("Not enough bloat to measure throttling")
+	}
+
+	// One compaction pass processes roughly bloatPages page rounds, each of
+	// which must sleep DelayMs. Assert on half of that as a safety margin
+	// against estimation drift between this call and the one made inside
+	// CompactTableUpdate.
+	conn.DelayMs = 20
+	start := time.Now()
+	if err := conn.CompactTableUpdate(tableName); err != nil {
+		t.Fatalf("CompactTableUpdate failed: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	minExpected := time.Duration(bloatPages/2) * 20 * time.Millisecond
+	if elapsed < minExpected {
+		t.Errorf("Expected at least %v of throttling for %d bloat pages with 20ms delay, took %v",
+			minExpected, bloatPages, elapsed)
+	}
+	t.Logf("Compaction with 20ms delay over ~%d bloat pages took %v", bloatPages, elapsed)
 }
 
 // =============================================================================
@@ -826,7 +893,31 @@ func TestCLIErrorJobsWithoutDebloat(t *testing.T) {
 	}
 }
 
-// TestCLIErrorDebloatWithoutTable tests behavior when no table specified for debloat
+// TestCLIErrorDebloatWithToast tests that --debloat rejects --toast and --btree
+// (only heap debloat is implemented; silently debloating the heap instead
+// would be misleading)
+func TestCLIErrorDebloatWithToast(t *testing.T) {
+	conn := setupTestDB(t)
+	createBloatedTable(t, conn, "toast_error_table", 1000, 50)
+	conn.Close()
+
+	for _, flag := range []string{"--toast", "--btree"} {
+		output, err := runQwashCLI(t, "--debloat", flag, "-t", "toast_error_table")
+
+		// Should fail
+		if err == nil {
+			t.Errorf("Expected error when using %s with --debloat, but got success\nOutput: %s", flag, output)
+		}
+
+		// Should mention the unsupported combination
+		if !strings.Contains(strings.ToLower(output), "not supported") {
+			t.Logf("Warning: Error message doesn't clearly mention the unsupported combination\nOutput: %s", output)
+		}
+	}
+}
+
+// TestCLIErrorDebloatWithoutTable tests that --debloat without -t fails:
+// debloating the whole database must be requested explicitly with --all
 func TestCLIErrorDebloatWithoutTable(t *testing.T) {
 	conn := setupTestDB(t)
 	// Create some tables
@@ -834,14 +925,56 @@ func TestCLIErrorDebloatWithoutTable(t *testing.T) {
 	createBloatedTable(t, conn, "auto_table_2", 1000, 50)
 	conn.Close()
 
-	// Without -t, should process all tables (not an error)
 	output, err := runQwashCLI(t, "--debloat")
+
+	// Should fail: neither -t nor --all was given
+	if err == nil {
+		t.Errorf("Expected error when using --debloat without -t or --all, but got success\nOutput: %s", output)
+	}
+
+	// Should mention the --all escape hatch
+	if !strings.Contains(output, "--all") {
+		t.Logf("Warning: Error message doesn't mention --all\nOutput: %s", output)
+	}
+}
+
+// TestCLIDebloatAll tests that --debloat --all explicitly processes all tables
+func TestCLIDebloatAll(t *testing.T) {
+	conn := setupTestDB(t)
+	createBloatedTable(t, conn, "all_table_1", 1000, 50)
+	createBloatedTable(t, conn, "all_table_2", 1000, 50)
+	initial1 := getTablePages(t, conn, "all_table_1")
+	initial2 := getTablePages(t, conn, "all_table_2")
+	conn.Close()
+
+	output, err := runQwashCLI(t, "--debloat", "--all")
+	if err != nil {
+		t.Fatalf("CLI failed: %v\nOutput: %s", err, output)
+	}
 
 	t.Logf("CLI output:\n%s", output)
 
-	// This should work (process all tables)
-	if err != nil {
-		t.Logf("Note: debloat without -t returned error (may be expected): %v", err)
+	conn2, _ := db.Connect(getTestConfig(), false)
+	defer conn2.Close()
+	if final := getTablePages(t, conn2, "all_table_1"); final >= initial1 {
+		t.Errorf("Expected page reduction on all_table_1: initial=%d, final=%d", initial1, final)
+	}
+	if final := getTablePages(t, conn2, "all_table_2"); final >= initial2 {
+		t.Errorf("Expected page reduction on all_table_2: initial=%d, final=%d", initial2, final)
+	}
+}
+
+// TestCLIErrorAllWithTable tests that --all and -t are mutually exclusive
+func TestCLIErrorAllWithTable(t *testing.T) {
+	conn := setupTestDB(t)
+	createBloatedTable(t, conn, "all_conflict_table", 1000, 50)
+	conn.Close()
+
+	output, err := runQwashCLI(t, "--debloat", "--all", "-t", "all_conflict_table")
+
+	// Should fail
+	if err == nil {
+		t.Errorf("Expected error when using --all with -t, but got success\nOutput: %s", output)
 	}
 }
 
@@ -866,6 +999,67 @@ func TestCLIDebloatWithLimitSize(t *testing.T) {
 	// Output should mention limit was reached or show removal amount
 	if strings.Contains(output, "limit reached") {
 		t.Log("Limit was reached as expected")
+	}
+}
+
+// TestCLIDebloatLimitSkippedNotErrors verifies that tables skipped because the
+// --limit was reached are reported as skipped (not errors), don't trigger a
+// non-zero exit code, and are counted consistently.
+func TestCLIDebloatLimitSkippedNotErrors(t *testing.T) {
+	conn := setupTestDB(t)
+	for _, name := range []string{"sk1", "sk2", "sk3", "sk4", "sk5"} {
+		createBloatedTable(t, conn, name, 8000, 50)
+	}
+	conn.Close()
+
+	// A tiny limit ensures most tables are skipped.
+	output, err := runQwashCLI(t, "--debloat", "--limit", "50KB", "--jobs", "1",
+		"-t", "sk1", "-t", "sk2", "-t", "sk3", "-t", "sk4", "-t", "sk5", "--json")
+	if err != nil {
+		t.Fatalf("skipped tables must not cause a non-zero exit: %v\nOutput: %s", err, output)
+	}
+
+	var result struct {
+		Summary struct {
+			TablesCompacted int  `json:"tables_compacted"`
+			Skipped         int  `json:"skipped"`
+			Errors          int  `json:"errors"`
+			LimitReached    bool `json:"limit_reached"`
+		} `json:"summary"`
+		Results []struct {
+			Table   string `json:"table"`
+			Skipped bool   `json:"skipped"`
+			Error   string `json:"error"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("Failed to parse JSON: %v\nOutput: %s", err, output)
+	}
+
+	if result.Summary.Skipped == 0 {
+		t.Errorf("Expected some tables to be skipped, got 0\nOutput: %s", output)
+	}
+	if result.Summary.Errors != 0 {
+		t.Errorf("Skipped tables must not be counted as errors, got errors=%d", result.Summary.Errors)
+	}
+	if !result.Summary.LimitReached {
+		t.Errorf("Expected limit_reached=true")
+	}
+	// Every result is either compacted or skipped, never an error here.
+	for _, r := range result.Results {
+		if r.Error != "" {
+			t.Errorf("Table %s reported an error %q; expected only compacted/skipped", r.Table, r.Error)
+		}
+	}
+
+	// Text report must use a SKIPPED section, not ERRORS.
+	textOut, _ := runQwashCLI(t, "--debloat", "--limit", "50KB", "--jobs", "1",
+		"-t", "sk1", "-t", "sk2", "-t", "sk3", "-t", "sk4", "-t", "sk5")
+	if strings.Contains(textOut, "ERRORS") {
+		t.Errorf("Text report should not contain an ERRORS section for skips\nOutput: %s", textOut)
+	}
+	if !strings.Contains(textOut, "SKIPPED") {
+		t.Errorf("Text report should contain a SKIPPED section\nOutput: %s", textOut)
 	}
 }
 

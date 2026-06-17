@@ -5,9 +5,10 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
-	"qwash/analysis"
-	"qwash/db"
+	"github.com/Alain-L/qwash/analysis"
+	"github.com/Alain-L/qwash/db"
 )
 
 // =============================================================================
@@ -132,6 +133,112 @@ func TestToastEstimateNoBloat(t *testing.T) {
 	// 0% delete should give ~0-8% bloat (baseline overhead)
 	if *tb.BloatPct > 8 {
 		t.Errorf("Expected bloat < 8%% for non-bloated table, got %.1f%%", *tb.BloatPct)
+	}
+}
+
+// TestToastStaleStatsAfterDelete verifies that un-vacuumed deletes flag the
+// estimate as stale (it understates the real reclaimable bloat until VACUUM),
+// while a freshly vacuumed table is not flagged.
+func TestToastStaleStatsAfterDelete(t *testing.T) {
+	conn := setupTestDB(t)
+	defer conn.Close()
+	ctx := context.Background()
+
+	// Created + vacuumed by the helper → clean stats.
+	createBloatedToastTable(t, conn, "toast_stale", 3000, 0)
+
+	results, err := analysis.DetectToastBloat(ctx, conn)
+	if err != nil {
+		t.Fatalf("DetectToastBloat failed: %v", err)
+	}
+	if tb := findToastResult(t, results, "toast_stale"); tb == nil {
+		t.Fatal("toast_stale not found")
+	} else if tb.StaleStats {
+		t.Errorf("Freshly vacuumed table must not be flagged stale")
+	}
+
+	// Delete half WITHOUT vacuuming, so the dead chunks aren't reclaimed and
+	// the toast stats stay stale.
+	if _, err := conn.Exec(ctx, "DELETE FROM toast_stale WHERE id % 2 = 0"); err != nil {
+		t.Fatalf("delete failed: %v", err)
+	}
+	conn.Close()
+
+	// A fresh connection avoids the per-session pg_stat snapshot cache
+	// (stats_fetch_consistency), so n_dead_tup reflects the delete.
+	conn2, err := db.Connect(getTestConfig(), false)
+	if err != nil {
+		t.Fatalf("reconnect failed: %v", err)
+	}
+	defer conn2.Close()
+
+	// Before PostgreSQL 15 the stats collector is asynchronous: n_dead_tup
+	// lands within ~1s of the delete, not instantly. This mirrors real use
+	// (the warning appears once stats propagate); poll until it does.
+	var stale bool
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		results, err = analysis.DetectToastBloat(ctx, conn2)
+		if err != nil {
+			t.Fatalf("DetectToastBloat failed: %v", err)
+		}
+		for i := range results {
+			if results[i].TableName == "toast_stale" {
+				stale = results[i].StaleStats
+			}
+		}
+		if stale || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if !stale {
+		t.Errorf("Un-vacuumed deletes must flag the estimate stale, got stale=false")
+	}
+}
+
+// TestToastInsufficientPrivilege verifies that a role without access to
+// pg_toast gets a clear "insufficient privilege" warning, not a misleading
+// "no chunks" (which would suggest the table is bloat-free).
+func TestToastInsufficientPrivilege(t *testing.T) {
+	admin := setupTestDB(t)
+	ctx := context.Background()
+	createBloatedToastTable(t, admin, "toast_priv", 3000, 50)
+	admin.Exec(ctx, "DROP ROLE IF EXISTS qwash_toast_lim")
+	if _, err := admin.Exec(ctx, "CREATE ROLE qwash_toast_lim LOGIN PASSWORD 'x'"); err != nil {
+		t.Fatalf("create role failed: %v", err)
+	}
+	admin.Exec(ctx, "GRANT USAGE ON SCHEMA public TO qwash_toast_lim")
+	admin.Exec(ctx, "GRANT SELECT ON toast_priv TO qwash_toast_lim")
+	defer func() {
+		admin.Exec(ctx, "REVOKE ALL ON toast_priv FROM qwash_toast_lim")
+		admin.Exec(ctx, "REVOKE ALL ON SCHEMA public FROM qwash_toast_lim")
+		admin.Exec(ctx, "DROP ROLE IF EXISTS qwash_toast_lim")
+		admin.Close()
+	}()
+
+	cfg := getTestConfig()
+	cfg.User = "qwash_toast_lim"
+	cfg.Password = "x"
+	limited, err := db.Connect(cfg, false)
+	if err != nil {
+		t.Fatalf("connect as limited role failed: %v", err)
+	}
+	defer limited.Close()
+
+	results, err := analysis.DetectToastBloat(ctx, limited)
+	if err != nil {
+		t.Fatalf("DetectToastBloat failed: %v", err)
+	}
+	tb := findToastResult(t, results, "toast_priv")
+	if tb == nil {
+		t.Fatal("toast_priv not found in results")
+	}
+	if tb.Warning != "insufficient privilege" {
+		t.Errorf("Expected 'insufficient privilege' warning, got %q", tb.Warning)
+	}
+	if tb.BloatPct != nil {
+		t.Errorf("Must not produce a bloat figure without pg_toast access, got %v", *tb.BloatPct)
 	}
 }
 

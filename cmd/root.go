@@ -3,38 +3,38 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
+	"os"
+	"os/signal"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
-	"qwash/analysis"
-	"qwash/db"
-	"qwash/output"
+	"github.com/Alain-L/qwash/analysis"
+	"github.com/Alain-L/qwash/db"
+	"github.com/Alain-L/qwash/output"
 
 	"github.com/spf13/cobra"
-)
-
-// Version information (set from main.go)
-var (
-	appVersion = "dev"
-	appCommit  = "none"
-	appDate    = "unknown"
+	"golang.org/x/term"
 )
 
 // Global Flags
 var (
-	// Database connection
-	dbName       []string // --dbname
-	user         []string // --dbuser
-	host         []string // --host
-	port         []string // --port
-	pass         string   // --password
-	sslMode      string   // --sslmode
-	testConnFlag bool     // --test-connection
+	// Database connection. Empty values are omitted from the connection
+	// string so that pgx falls back to the standard PostgreSQL client
+	// conventions (PGHOST, PGUSER, PGPASSWORD, ~/.pgpass, defaults...).
+	dbName         string // --dbname (-d)
+	user           string // --dbuser (-U)
+	host           string // --host (-h)
+	port           string // --port (-p)
+	passwordPrompt bool   // --password (-W): force interactive password prompt
+	sslMode        string // --sslmode
+	testConnFlag   bool   // --test-connection
 
 	// Targeting options
 	targetTables  []string // --table (-t)
@@ -53,9 +53,10 @@ var (
 
 	// Debloat options
 	debloatFlag bool   // --debloat (-B)
-	fastFlag bool // --fast
-	slowFlag bool // --slow (1 page at a time with delay)
-	delayMs  int  // --delay (milliseconds between operations in slow mode)
+	allFlag     bool   // --all (debloat every table when no -t is given)
+	fastFlag    bool   // --fast
+	slowFlag    bool   // --slow (1 page at a time with delay)
+	delayMs     int    // --delay (milliseconds between operations in slow mode)
 	dryRunFlag  bool   // --dry-run
 	reindexFlag bool   // --reindex
 	limitStr    string // --limit (stop after reducing X bloat: 500MB, 1GB, 50%)
@@ -69,39 +70,57 @@ var (
 // rootCmd is the main command for qwash
 var rootCmd = &cobra.Command{
 	Use:   "qwash",
-	Short: "qwash is a PostgreSQL bloat analysis and reduction tool",
+	Short: "A no-dependency PostgreSQL introspection & maintenance CLI (table, index & TOAST bloat)",
 	Long: `qwash analyzes PostgreSQL catalogs to detect table and index bloat.
 It provides estimation, reporting, and optionally helps remove unnecessary bloat without downtime.`,
 	Run: executeAnalysis,
 }
 
+// exitCode is the process exit status, set by the run functions:
+//
+//	0 = success
+//	1 = fatal error (set via fatal(); e.g. bad flags, connection failure)
+//	2 = completed with per-table errors (some tables could not be processed)
+//
+// It is applied in Execute() after the command returns, so that deferred
+// cleanup (connection close) still runs before the process exits.
+var exitCode int
+
 // Execute runs the CLI
 func Execute(version, commit, date string) {
-	appVersion = version
-	appCommit = commit
-	appDate = date
 	rootCmd.Version = fmt.Sprintf("%s (commit: %s, built: %s)", version, commit, date)
 
+	initLogger()
+
 	if err := rootCmd.Execute(); err != nil {
-		log.Fatalf("Error: %v", err)
+		fatal("command failed", "error", err)
 	}
+	os.Exit(exitCode)
 }
 
 // init sets up the CLI flags
 func init() {
-	// Database connection options
-	rootCmd.PersistentFlags().StringSliceVarP(&dbName, "dbname", "d", nil,
-		"Target database(s) for analysis")
-	rootCmd.PersistentFlags().StringSliceVarP(&user, "dbuser", "U", nil,
-		"Database user(s) for connection")
-	rootCmd.PersistentFlags().StringSliceVarP(&host, "host", "H", nil,
-		"Database host(s) (default: localhost)")
-	rootCmd.PersistentFlags().StringSliceVarP(&port, "port", "P", nil,
-		"Database port(s) (default: 5432)")
-	rootCmd.PersistentFlags().StringVarP(&pass, "password", "W", "",
-		"Database password (optional)")
-	rootCmd.PersistentFlags().StringVar(&sslMode, "sslmode", "disable",
-		"SSL mode (disable, require, verify-ca, verify-full)")
+	// Define the help flag without a shorthand (like psql, which uses -? and
+	// --help) so that -h stays available for --host. Cobra only adds its own
+	// -h shorthand when no help flag is registered.
+	rootCmd.PersistentFlags().Bool("help", false,
+		"Show help")
+
+	// Database connection options, following the usual PostgreSQL client
+	// conventions: same short flags as psql, PG* environment variables and
+	// ~/.pgpass honored when a parameter is not given.
+	rootCmd.PersistentFlags().StringVarP(&dbName, "dbname", "d", "",
+		"Database name (default: PGDATABASE, or the user name)")
+	rootCmd.PersistentFlags().StringVarP(&user, "dbuser", "U", "",
+		"Database user (default: PGUSER, or the OS user)")
+	rootCmd.PersistentFlags().StringVarP(&host, "host", "h", "",
+		"Database host or socket directory (default: PGHOST, or local socket)")
+	rootCmd.PersistentFlags().StringVarP(&port, "port", "p", "",
+		"Database port (default: PGPORT, or 5432)")
+	rootCmd.PersistentFlags().BoolVarP(&passwordPrompt, "password", "W", false,
+		"Force password prompt (default: PGPASSWORD, or ~/.pgpass)")
+	rootCmd.PersistentFlags().StringVar(&sslMode, "sslmode", "",
+		"SSL mode: disable, allow, prefer, require, verify-ca, verify-full (default: PGSSLMODE, or prefer)")
 
 	// Database testing
 	rootCmd.PersistentFlags().BoolVarP(&testConnFlag, "test-connection", "T", false,
@@ -121,9 +140,9 @@ func init() {
 	rootCmd.PersistentFlags().BoolVarP(&estimateFlag, "estimate", "E", false,
 		"Display a report of estimated bloat")
 	rootCmd.PersistentFlags().BoolVarP(&detailFlag, "detail", "D", false,
-		"Show detailed bloat analysis per table and index")
+		"Show detailed bloat analysis per table and index (not yet implemented)")
 	rootCmd.PersistentFlags().BoolVar(&heapFlag, "heap", false,
-		"Analyze heap bloat (default if neither --heap nor --toast specified)")
+		"Analyze heap bloat (default if no --heap, --toast or --btree specified)")
 	rootCmd.PersistentFlags().BoolVar(&toastFlag, "toast", false,
 		"Analyze TOAST bloat")
 	rootCmd.PersistentFlags().BoolVar(&btreeFlag, "btree", false,
@@ -132,12 +151,14 @@ func init() {
 	// Debloat options
 	rootCmd.PersistentFlags().BoolVarP(&debloatFlag, "debloat", "B", false,
 		"Perform bloat reduction on tables")
+	rootCmd.PersistentFlags().BoolVar(&allFlag, "all", false,
+		"Debloat every table in the database (required when --table is not given)")
 	rootCmd.PersistentFlags().BoolVar(&fastFlag, "fast", false,
 		"Fast mode: 4 threads, 1 pass (default: 2 threads, 2 passes)")
 	rootCmd.PersistentFlags().BoolVar(&slowFlag, "slow", false,
 		"Slow mode: 1 thread, 3 passes with delay between operations")
 	rootCmd.PersistentFlags().IntVar(&delayMs, "delay", 10,
-		"Delay in milliseconds between operations in slow mode (default: 10)")
+		"Delay in milliseconds between page rounds in slow mode")
 	rootCmd.PersistentFlags().BoolVar(&dryRunFlag, "dry-run", false,
 		"Show what would be done without making changes")
 	rootCmd.PersistentFlags().BoolVar(&reindexFlag, "reindex", false,
@@ -145,7 +166,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&limitStr, "limit", "",
 		"Stop after reducing X bloat (e.g., 500MB, 1GB, 50%)")
 	rootCmd.PersistentFlags().IntVarP(&jobsFlag, "jobs", "j", 0,
-		"Number of parallel workers (default: 4, or 8 with --fast)")
+		"Number of parallel workers (default: 2, 4 with --fast, 1 with --slow)")
 
 	// Output options
 	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false,
@@ -156,62 +177,89 @@ func init() {
 
 // executeAnalysis is the core function that orchestrates the pipeline
 func executeAnalysis(cmd *cobra.Command, args []string) {
-	// Build connection config
+	// Raise verbosity to INFO when requested; otherwise INFO diagnostics stay
+	// quiet and only warnings/errors are shown.
+	if verboseFlag {
+		setLogLevel(slog.LevelInfo)
+	}
+
+	// Build connection config. Only explicitly-given parameters are set;
+	// pgx resolves the rest from the PG* environment and libpq defaults.
 	dbConfig := db.Config{
-		Host:     getFirstOrDefault(host, "localhost"),
-		Port:     getFirstOrDefault(port, "5432"),
-		User:     getFirstOrDefault(user, "postgres"),
-		Password: pass,
-		Database: getFirstOrDefault(dbName, "postgres"),
+		Host:     host,
+		Port:     port,
+		User:     user,
+		Database: dbName,
 		SSLMode:  sslMode,
+	}
+	if passwordPrompt {
+		dbConfig.Password = promptPassword()
 	}
 
 	// Step 1: Validate flag combinations
 	if estimateFlag && debloatFlag {
-		log.Fatalf("[ERROR] --estimate (-E) and --debloat (-B) cannot be used together.")
+		fatal("--estimate (-E) and --debloat (-B) cannot be used together")
+	}
+
+	// --toast and --btree are analysis-only: only heap debloat is implemented.
+	// Without this guard, --debloat --toast would silently debloat the heap.
+	if debloatFlag && (toastFlag || btreeFlag) {
+		fatal("--toast and --btree are not supported with --debloat (-B); only heap debloat is implemented")
+	}
+
+	// Debloating the whole database must be an explicit decision: require
+	// either a table list (-t) or the --all flag.
+	if debloatFlag && len(targetTables) == 0 && !allFlag {
+		fatal("--debloat requires --table (-t) to target specific tables, or --all to debloat every table")
+	}
+	if allFlag && !debloatFlag {
+		fatal("--all requires --debloat (-B)")
+	}
+	if allFlag && len(targetTables) > 0 {
+		fatal("--all and --table (-t) are mutually exclusive")
 	}
 
 	// --reindex requires --debloat
 	if reindexFlag && !debloatFlag {
-		log.Fatalf("[ERROR] --reindex requires --debloat (-B).")
+		fatal("--reindex requires --debloat (-B)")
 	}
 
 	// --fast, --slow, --dry-run require --debloat
 	if (fastFlag || slowFlag || dryRunFlag) && !debloatFlag {
-		log.Fatalf("[ERROR] --fast, --slow, and --dry-run require --debloat (-B).")
+		fatal("--fast, --slow, and --dry-run require --debloat (-B)")
 	}
 
 	// --fast and --slow are mutually exclusive
 	if fastFlag && slowFlag {
-		log.Fatalf("[ERROR] --fast and --slow are mutually exclusive.")
+		fatal("--fast and --slow are mutually exclusive")
 	}
 
 	// --delay requires --slow
 	if cmd.Flags().Changed("delay") && !slowFlag {
-		log.Fatalf("[ERROR] --delay can only be used with --slow mode.")
+		fatal("--delay can only be used with --slow mode")
 	}
 
 	// Validate --delay value
 	if delayMs < 0 {
-		log.Fatalf("[ERROR] --delay must be >= 0 (got %d).", delayMs)
+		fatal("--delay must be >= 0", "got", delayMs)
 	}
 	if delayMs > 10000 {
-		log.Fatalf("[ERROR] --delay must be <= 10000ms (got %d). Use lower values for reasonable performance.", delayMs)
+		fatal("--delay must be <= 10000ms; use lower values for reasonable performance", "got", delayMs)
 	}
 
 	// --jobs requires --debloat
 	if cmd.Flags().Changed("jobs") && !debloatFlag {
-		log.Fatalf("[ERROR] --jobs (-j) requires --debloat (-B).")
+		fatal("--jobs (-j) requires --debloat (-B)")
 	}
 
 	// Validate --limit value (early validation before DB connection)
 	if limitStr != "" {
 		if _, _, err := parseLimit(limitStr); err != nil {
-			log.Fatalf("[ERROR] Invalid --limit value: %v", err)
+			fatal("invalid --limit value", "error", err)
 		}
 		// --limit requires --debloat
 		if !debloatFlag {
-			log.Fatalf("[ERROR] --limit requires --debloat (-B).")
+			fatal("--limit requires --debloat (-B)")
 		}
 	}
 
@@ -228,17 +276,15 @@ func executeAnalysis(cmd *cobra.Command, args []string) {
 
 	// Step 2: Test database connection if requested
 	if testConnFlag {
-		if verboseFlag {
-			fmt.Printf("Connecting to %s@%s:%s/%s...\n",
-				dbConfig.User, dbConfig.Host, dbConfig.Port, dbConfig.Database)
-		}
 		connection, err := db.Connect(dbConfig, verboseFlag)
 		if err != nil {
-			log.Fatalf("Connection failed: %v", err)
+			fatal("connection failed", "error", err)
 		}
 		defer connection.Close()
 
-		fmt.Println("Connection OK")
+		// Show the target actually resolved by pgx (flags, PG* environment
+		// variables or defaults), so the user can see where they landed.
+		fmt.Printf("Connection OK (%s)\n", connection.ResolvedTarget())
 		databases, err := connection.ListDatabases()
 		if err == nil {
 			fmt.Println("Available databases:")
@@ -252,18 +298,22 @@ func executeAnalysis(cmd *cobra.Command, args []string) {
 	// Step 3: Establish database connection
 	connection, err := db.Connect(dbConfig, verboseFlag)
 	if err != nil {
-		log.Fatalf("Failed to connect: %v", err)
+		fatal("failed to connect", "error", err)
 	}
 	defer connection.Close()
+
+	// Cancel long operations cleanly on Ctrl-C / SIGTERM.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	// Step 4: Determine operation mode
 	switch {
 	case estimateFlag:
-		runEstimate(connection)
+		runEstimate(ctx, connection)
 		return
 
 	case debloatFlag:
-		runDebloat(connection)
+		runDebloat(ctx, connection)
 		return
 
 	case detailFlag:
@@ -277,16 +327,31 @@ func executeAnalysis(cmd *cobra.Command, args []string) {
 	}
 }
 
-// Helper function to get the first value from a slice or return a default value
-func getFirstOrDefault(arr []string, defaultValue string) string {
-	if len(arr) > 0 {
-		return arr[0]
+// keepIf returns the items of a slice matching the predicate.
+func keepIf[T any](items []T, pred func(T) bool) []T {
+	var out []T
+	for _, it := range items {
+		if pred(it) {
+			out = append(out, it)
+		}
 	}
-	return defaultValue
+	return out
+}
+
+// promptPassword interactively reads the database password (--password/-W),
+// without echoing it to the terminal — same behavior as psql -W.
+func promptPassword() string {
+	fmt.Fprint(os.Stderr, "Password: ")
+	pw, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		fatal("failed to read password", "error", err)
+	}
+	return string(pw)
 }
 
 // runEstimate executes the bloat estimation report
-func runEstimate(connection *db.DB) {
+func runEstimate(ctx context.Context, connection *db.DB) {
 	if verboseFlag {
 		fmt.Println("Running bloat estimation...")
 		if len(targetSchemas) > 0 {
@@ -313,18 +378,18 @@ func runEstimate(connection *db.DB) {
 	var tableBloat []analysis.BloatTable
 	var err error
 	if heapFlag {
-		tableBloat, err = analysis.DetectTableBloat(context.Background(), connection)
+		tableBloat, err = analysis.DetectTableBloat(ctx, connection)
 		if err != nil {
-			log.Fatalf("Failed to analyze table bloat: %v", err)
+			fatal("failed to analyze table bloat", "error", err)
 		}
 	}
 
 	// Analyze TOAST bloat if --toast is enabled
 	var toastBloat []analysis.ToastBloat
 	if toastFlag {
-		toastBloat, err = analysis.DetectToastBloat(context.Background(), connection)
+		toastBloat, err = analysis.DetectToastBloat(ctx, connection)
 		if err != nil {
-			log.Printf("[WARNING] Failed to analyze TOAST bloat: %v", err)
+			slog.Warn("failed to analyze TOAST bloat", "error", err)
 			// Continue without TOAST data
 		}
 	}
@@ -332,11 +397,49 @@ func runEstimate(connection *db.DB) {
 	// Analyze B-Tree index bloat if --btree is enabled
 	var indexBloat []analysis.BloatIndex
 	if btreeFlag {
-		indexBloat, err = analysis.DetectBtreeIndexBloat(context.Background(), connection)
+		indexBloat, err = analysis.DetectBtreeIndexBloat(ctx, connection)
 		if err != nil {
-			log.Printf("[WARNING] Failed to analyze B-Tree index bloat: %v", err)
+			slog.Warn("failed to analyze B-Tree index bloat", "error", err)
 			// Continue without index data
 		}
+	}
+
+	// Hide system-schema objects unless --system is given. The embedded
+	// queries now return system catalogs too (so --system can surface them),
+	// and this is the single authoritative place that filters them out.
+	if !systemFlag {
+		isSystem := func(schema string) bool {
+			switch schema {
+			case "pg_catalog", "information_schema", "pg_toast":
+				return true
+			}
+			return false
+		}
+		tableBloat = keepIf(tableBloat, func(t analysis.BloatTable) bool { return !isSystem(t.Schema) })
+		toastBloat = keepIf(toastBloat, func(t analysis.ToastBloat) bool { return !isSystem(t.Schema) })
+		indexBloat = keepIf(indexBloat, func(i analysis.BloatIndex) bool { return !isSystem(i.Schema) })
+	}
+
+	// Apply --schema and --exclude-table filters. These used to be silently
+	// ignored in estimate mode (only --debloat honored them), so a report
+	// could include tables the user believed were filtered out.
+	if len(targetSchemas) > 0 {
+		tableBloat = keepIf(tableBloat, func(t analysis.BloatTable) bool { return slices.Contains(targetSchemas, t.Schema) })
+		toastBloat = keepIf(toastBloat, func(t analysis.ToastBloat) bool { return slices.Contains(targetSchemas, t.Schema) })
+		indexBloat = keepIf(indexBloat, func(i analysis.BloatIndex) bool { return slices.Contains(targetSchemas, i.Schema) })
+	}
+	if len(excludeTbl) > 0 {
+		excluded := func(schema, table string) bool {
+			for _, x := range excludeTbl {
+				if x == table || x == schema+"."+table {
+					return true
+				}
+			}
+			return false
+		}
+		tableBloat = keepIf(tableBloat, func(t analysis.BloatTable) bool { return !excluded(t.Schema, t.TableName) })
+		toastBloat = keepIf(toastBloat, func(t analysis.ToastBloat) bool { return !excluded(t.Schema, t.TableName) })
+		indexBloat = keepIf(indexBloat, func(i analysis.BloatIndex) bool { return !excluded(i.Schema, i.TableName) })
 	}
 
 	// Filter by specific tables if -t is provided
@@ -451,7 +554,7 @@ func filterIndexByTable(indexes []analysis.BloatIndex, targetNames []string) []a
 }
 
 // runDebloat executes the bloat reduction process
-func runDebloat(connection *db.DB) {
+func runDebloat(ctx context.Context, connection *db.DB) {
 	// Warning for system tables
 	if systemFlag {
 		fmt.Println("WARNING: You are about to debloat system tables!")
@@ -469,7 +572,7 @@ func runDebloat(connection *db.DB) {
 	// Parse limit if specified
 	limitBytes, limitPercent, err := parseLimit(limitStr)
 	if err != nil {
-		log.Fatalf("[ERROR] Invalid --limit value: %v", err)
+		fatal("invalid --limit value", "error", err)
 	}
 
 	// Show mode (verbose only, except dry-run which is always shown in text mode)
@@ -490,12 +593,21 @@ func runDebloat(connection *db.DB) {
 	// Get list of tables to process
 	tables, err := getTargetTables(connection)
 	if err != nil {
-		log.Fatalf("Failed to get target tables: %v", err)
+		fatal("failed to get target tables", "error", err)
 	}
 
 	if len(tables) == 0 {
 		fmt.Println("No tables to debloat.")
 		return
+	}
+
+	// Estimate bloat for the whole database in a single catalog-wide scan,
+	// then look results up per table. Running the bloat query once (instead of
+	// once per table, and again per compaction pass) avoids quadratic cost on
+	// large databases.
+	allBloat, err := connection.GetAllBloatPages()
+	if err != nil {
+		fatal("failed to estimate bloat", "error", err)
 	}
 
 	// Calculate total bloat, total size, and build map for LPT scheduling
@@ -505,12 +617,11 @@ func runDebloat(connection *db.DB) {
 	var totalDatabaseSize int64
 	tableBloatPages := make(map[string]int)
 	for _, table := range tables {
-		bloatPages, err := connection.GetBloatPages(table)
-		if err == nil && bloatPages > 0 {
+		if bloatPages := allBloat[table]; bloatPages > 0 {
 			totalBloat += int64(bloatPages) * 8192 // Convert pages to bytes (8KB per page)
 			tableBloatPages[table] = bloatPages
 		}
-		// Get total table size for percentage calculation
+		// Get total table size for percentage calculation (cheap pg_class lookup)
 		tablePages, err := connection.GetTablePages(table)
 		if err == nil && tablePages > 0 {
 			totalDatabaseSize += int64(tablePages) * 8192
@@ -572,10 +683,10 @@ func runDebloat(connection *db.DB) {
 
 	if numWorkers == 1 {
 		// Sequential mode (original behavior)
-		results, limitReached = runDebloatSequential(connection, tables, limitBytes)
+		results, limitReached = runDebloatSequential(ctx, connection, tables, tableBloatPages, limitBytes)
 	} else {
 		// Parallel mode
-		results, limitReached = runDebloatParallel(connection, tables, numWorkers, limitBytes)
+		results, limitReached = runDebloatParallel(ctx, connection, tables, tableBloatPages, numWorkers, limitBytes)
 	}
 
 	totalDuration := time.Since(startTime)
@@ -595,10 +706,19 @@ func runDebloat(connection *db.DB) {
 	} else {
 		output.PrintDebloatSummary(results, totalDuration, opts)
 	}
+
+	// Signal per-table failures through the exit code (for automation).
+	// Skipped tables (limit reached) carry no error and don't count.
+	for _, r := range results {
+		if r.Error != "" {
+			exitCode = 2
+			break
+		}
+	}
 }
 
 // runDebloatSequential processes tables one at a time (original behavior)
-func runDebloatSequential(connection *db.DB, tables []string, limitBytes int64) ([]analysis.DebloatResult, bool) {
+func runDebloatSequential(ctx context.Context, connection *db.DB, tables []string, bloatByTable map[string]int, limitBytes int64) ([]analysis.DebloatResult, bool) {
 	var results []analysis.DebloatResult
 	var totalBloatRemoved int64
 	limitReached := false
@@ -609,12 +729,19 @@ func runDebloatSequential(connection *db.DB, tables []string, limitBytes int64) 
 	connection.SilentProgress = jsonFlag || (!verboseFlag && !dryRunFlag)
 
 	for i, table := range tables {
-		// Check if limit is reached
+		// Stop launching new work on Ctrl-C; tables already done are kept.
+		if ctx.Err() != nil {
+			slog.Warn("interrupted; stopping before remaining tables", "processed", i, "total", len(tables))
+			break
+		}
+
+		// Check if limit is reached: record the remaining tables as skipped
+		// (not processed) so the report and counts match parallel mode.
 		if limitBytes > 0 && totalBloatRemoved >= limitBytes {
-			if verboseFlag {
-				fmt.Printf("  %s: skipped (limit reached)\n", table)
-			}
 			limitReached = true
+			for _, skip := range tables[i:] {
+				results = append(results, analysis.DebloatResult{Table: skip, Skipped: true})
+			}
 			break
 		}
 
@@ -624,7 +751,7 @@ func runDebloatSequential(connection *db.DB, tables []string, limitBytes int64) 
 		}
 
 		connection.CurrentTableIndex = i
-		result := processTable(connection, table)
+		result := processTable(ctx, connection, table, bloatByTable[table])
 		results = append(results, result)
 
 		if result.BloatRemoved > 0 {
@@ -641,7 +768,7 @@ func runDebloatSequential(connection *db.DB, tables []string, limitBytes int64) 
 }
 
 // runDebloatParallel processes tables concurrently using a worker pool
-func runDebloatParallel(connection *db.DB, tables []string, numWorkers int, limitBytes int64) ([]analysis.DebloatResult, bool) {
+func runDebloatParallel(ctx context.Context, connection *db.DB, tables []string, bloatByTable map[string]int, numWorkers int, limitBytes int64) ([]analysis.DebloatResult, bool) {
 	// Channels for work distribution and results
 	tableChan := make(chan string, len(tables))
 	resultChan := make(chan analysis.DebloatResult, len(tables))
@@ -656,7 +783,7 @@ func runDebloatParallel(connection *db.DB, tables []string, numWorkers int, limi
 	for i := 0; i < numWorkers; i++ {
 		worker, err := connection.NewWorkerConnection(i + 1)
 		if err != nil {
-			log.Fatalf("Failed to create worker connection %d: %v", i+1, err)
+			fatal("failed to create worker connection", "worker", i+1, "error", err)
 		}
 		workers[i] = worker
 	}
@@ -691,18 +818,23 @@ func runDebloatParallel(connection *db.DB, tables []string, numWorkers int, limi
 		go func(w *db.DB) {
 			defer wg.Done()
 			for table := range tableChan {
-				// Check if limit reached before processing
-				if limitBytes > 0 && atomic.LoadInt64(&totalBloatRemoved) >= limitBytes {
-					atomic.StoreInt64(&limitReached, 1)
-					// Still need to report skipped tables
-					resultChan <- analysis.DebloatResult{
-						Table: table,
-						Error: "skipped (limit reached)",
-					}
+				// Stop processing new tables on Ctrl-C; drain the channel
+				// without working so the dispatcher's sends don't block.
+				if ctx.Err() != nil {
 					continue
 				}
 
-				result := processTable(w, table)
+				// Check if limit reached before processing
+				if limitBytes > 0 && atomic.LoadInt64(&totalBloatRemoved) >= limitBytes {
+					atomic.StoreInt64(&limitReached, 1)
+					// Report the table as skipped (an expected outcome, not an
+					// error), and count it so the progress bar still reaches 100%.
+					resultChan <- analysis.DebloatResult{Table: table, Skipped: true}
+					atomic.AddInt64(&tablesCompleted, 1)
+					continue
+				}
+
+				result := processTable(ctx, w, table, bloatByTable[table])
 				resultChan <- result
 
 				// Update counters
@@ -723,6 +855,10 @@ func runDebloatParallel(connection *db.DB, tables []string, numWorkers int, limi
 	// Wait for all workers to finish
 	wg.Wait()
 	close(resultChan)
+
+	if ctx.Err() != nil {
+		slog.Warn("interrupted; stopped processing remaining tables")
+	}
 
 	// Stop progress display
 	close(stopProgress)
@@ -762,15 +898,27 @@ func printParallelProgress(completed, total, workers int) {
 	fmt.Printf("\r\033[K[%s] %d/%d tables | %d %s", bar, completed, total, workers, workerWord)
 }
 
-
 // getTargetTables returns the list of tables to debloat based on flags
 func getTargetTables(connection *db.DB) ([]string, error) {
-	// If specific tables are provided, use them
+	// If specific tables are provided, resolve each one to its canonical
+	// schema-qualified name (search_path rules) so that every downstream
+	// consumer — estimation, advisory lock, DML — designates the same
+	// relation. This also fails fast on tables that don't exist, instead
+	// of reporting a confusing per-table error later.
 	if len(targetTables) > 0 {
-		return targetTables, nil
+		resolved := make([]string, 0, len(targetTables))
+		for _, t := range targetTables {
+			qualified, err := connection.ResolveTableName(t)
+			if err != nil {
+				return nil, err
+			}
+			resolved = append(resolved, qualified)
+		}
+		return resolved, nil
 	}
 
-	// Otherwise, get all tables (filtered by schema if specified)
+	// Otherwise, get all tables (filtered by schema if specified);
+	// ListTablesFiltered already returns schema-qualified names.
 	tables, err := connection.ListTablesFiltered(targetSchemas, systemFlag, excludeTbl)
 	if err != nil {
 		return nil, err
@@ -779,17 +927,12 @@ func getTargetTables(connection *db.DB) ([]string, error) {
 	return tables, nil
 }
 
-// processTable debloats a single table and returns the result
-func processTable(connection *db.DB, table string) analysis.DebloatResult {
+// processTable debloats a single table and returns the result.
+// bloatPages is the estimated bloat (in pages) precomputed once for the whole
+// database, so this function does not re-run the catalog-wide bloat query.
+func processTable(ctx context.Context, connection *db.DB, table string, bloatPages int) analysis.DebloatResult {
 	startTime := time.Now()
 	result := analysis.DebloatResult{Table: table, DryRun: dryRunFlag}
-
-	// Get initial bloat estimate
-	bloatPages, err := connection.GetBloatPages(table)
-	if err != nil {
-		result.Error = fmt.Sprintf("failed to estimate bloat: %v", err)
-		return result
-	}
 
 	if bloatPages <= 0 {
 		if verboseFlag {
@@ -805,6 +948,31 @@ func processTable(connection *db.DB, table string) analysis.DebloatResult {
 		return result
 	}
 	result.InitialPages = initialPages
+
+	// Target page count: compacting down to (current pages - bloat pages).
+	// Computed once and held fixed across passes, so later passes don't chase
+	// a target that drifts below the real minimum as the table shrinks.
+	toPage := initialPages - bloatPages
+	if toPage < 0 {
+		toPage = 0
+	}
+
+	// Preflight safety checks: surface advisories and refuse unsafe tables
+	// (non-owner -> VACUUM can't reclaim; no usable REPLICA IDENTITY -> UPDATE
+	// would fail). In dry-run we report the blocking reason but keep going so
+	// the estimate is still shown.
+	warnings, preflightErr := connection.DebloatPreflight(table)
+	for _, w := range warnings {
+		slog.Warn(w)
+	}
+	if preflightErr != nil {
+		if dryRunFlag {
+			slog.Warn("debloat would be refused", "table", table, "reason", preflightErr)
+		} else {
+			result.Error = preflightErr.Error()
+			return result
+		}
+	}
 
 	if dryRunFlag {
 		// Dry-run: just show what would happen
@@ -833,7 +1001,7 @@ func processTable(connection *db.DB, table string) analysis.DebloatResult {
 		passes = 3 // slow: 3 passes for thorough compaction
 	}
 	for pass := 1; pass <= passes; pass++ {
-		compactErr = connection.CompactTableUpdate(table)
+		compactErr = connection.CompactTableToTarget(ctx, table, toPage)
 		if compactErr != nil {
 			break
 		}
@@ -855,7 +1023,7 @@ func processTable(connection *db.DB, table string) analysis.DebloatResult {
 		if verboseFlag {
 			fmt.Printf("  %s: reindexing...\n", table)
 		}
-		if err := connection.ReindexTable(table); err != nil {
+		if err := connection.ReindexTable(ctx, table); err != nil {
 			result.Error = fmt.Sprintf("reindex failed: %v", err)
 		} else {
 			result.Reindexed = true

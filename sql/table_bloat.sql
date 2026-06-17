@@ -6,6 +6,10 @@
 --           with actual pages used, accounting for fillfactor and alignment
 --
 -- Compatible with PostgreSQL 9.4+ (requires multiple CTEs)
+--
+-- Sizes (relation_size, TOAST_size, bloat_size) are returned in raw bytes so
+-- the Go code consumes exact integers. To read this query by hand, wrap those
+-- columns in pg_size_pretty(...).
 
 WITH constants AS (
   -- PostgreSQL internal constants for bloat calculation
@@ -43,7 +47,10 @@ table_stats AS (
   FROM pg_attribute att
   JOIN pg_class tbl ON att.attrelid = tbl.oid
   JOIN pg_namespace ns ON ns.oid = tbl.relnamespace
-  JOIN pg_stat_user_tables psut ON psut.relid = tbl.oid
+  -- pg_stat_all_tables (not _user_) so system catalogs are covered too; the
+  -- application decides whether to show them (see --system). Stats for a user
+  -- table are identical in both views.
+  JOIN pg_stat_all_tables psut ON psut.relid = tbl.oid
   CROSS JOIN constants c
   LEFT JOIN pg_stats s
     ON s.schemaname = ns.nspname
@@ -52,7 +59,6 @@ table_stats AS (
     AND s.attname = att.attname
   WHERE NOT att.attisdropped
     AND tbl.relkind IN ('r', 'm')  -- Regular tables and materialized views
-    AND ns.nspname NOT IN ('pg_catalog', 'information_schema')
   GROUP BY
     ns.nspname, tbl.relname, tbl.oid, tbl.reltuples, tbl.relpages,
     tbl.reloptions, tbl.reltoastrelid, psut.n_live_tup, psut.n_dead_tup,
@@ -136,24 +142,35 @@ SELECT
   estimated_min_pages AS min_pages_required,
   actual_pages,
   fillfactor,
-  pg_size_pretty(
-    pg_relation_size(format('%I.%I', schemaname, tblname)::regclass)
-  ) AS relation_size,
-  COALESCE(
-    CASE WHEN reltoastrelid <> 0
-         THEN pg_size_pretty(pg_relation_size(reltoastrelid::regclass))
-         ELSE 'N/A'
-    END, 'N/A'
-  ) AS "TOAST_size",
+  pg_relation_size(format('%I.%I', schemaname, tblname)::regclass)::bigint
+    AS relation_size,
+  CASE WHEN reltoastrelid <> 0
+       THEN pg_relation_size(reltoastrelid::regclass)
+       ELSE 0
+  END::bigint AS "TOAST_size",
   -- Bloat size: use GREATEST to avoid negative values (over-estimated min_pages)
-  pg_size_pretty(
-    (GREATEST(0, actual_pages - estimated_min_pages) * block_size)::bigint
-  ) AS bloat_size,
+  (GREATEST(0, actual_pages - estimated_min_pages) * block_size)::bigint
+    AS bloat_size,
   -- Bloat percentage: use GREATEST and NULLIF to handle edge cases
   ROUND(
     (100.0 * GREATEST(0, actual_pages - estimated_min_pages)
      / NULLIF(actual_pages, 0)
     )::numeric, 2
-  ) AS bloat_pct
+  ) AS bloat_pct,
+  -- Stale/missing statistics: the estimate is driven by reltuples/relpages,
+  -- which only VACUUM/ANALYZE refresh. It is unusable when:
+  --   * the row count is unknown (reltuples < 0, never analyzed), or
+  --   * the catalog reports 0 pages while the table holds data on disk, or
+  --   * many dead tuples have accumulated since the last VACUUM (>5% of the
+  --     table) — a DELETE/UPDATE-heavy table whose reltuples no longer matches
+  --     reality, so the bloat would be badly under- or over-estimated.
+  -- n_dead_tup is the same signal autovacuum uses to decide a VACUUM is due.
+  (reltuples < 0
+   OR (actual_pages = 0
+       AND pg_relation_size(format('%I.%I', schemaname, tblname)::regclass) > 0)
+   OR (COALESCE(n_dead_tup, 0) > 0
+       AND COALESCE(n_dead_tup, 0)::float8
+           / NULLIF(COALESCE(n_live_tup, 0) + COALESCE(n_dead_tup, 0), 0) > 0.05)
+  ) AS stale_stats
 FROM bloat_estimation
 ORDER BY bloat_pct DESC;

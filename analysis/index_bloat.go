@@ -3,10 +3,10 @@ package analysis
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 
-	"qwash/db"
+	"github.com/Alain-L/qwash/db"
 )
 
 // btreeBloatQuery estimates B-Tree index bloat using catalog statistics.
@@ -83,7 +83,10 @@ index_stats AS (
          ELSE c.index_tuple_hdr + ((32 + 8 - 1) / 8)
     END AS index_tuple_hdr_bm,
     SUM((1 - COALESCE(s.null_frac, 0)) * COALESCE(s.avg_width, 1024)) AS data_width,
-    MAX(CASE WHEN ia.atttypid = 'pg_catalog.name'::regtype THEN 1
+    -- Unreliable when a key column is of type "name" (bad pg_stats widths) or
+    -- has no statistics at all (LEFT JOIN miss). The latter used to be an INNER
+    -- JOIN, which silently dropped such indexes from the report entirely.
+    MAX(CASE WHEN ia.atttypid = 'pg_catalog.name'::regtype OR s.attname IS NULL THEN 1
              ELSE 0 END) > 0 AS is_na,
     c.block_size,
     c.maxalign,
@@ -92,7 +95,7 @@ index_stats AS (
     c.item_pointer
   FROM index_attrs ia
   JOIN pg_namespace n ON n.oid = ia.relnamespace
-  JOIN pg_stats s
+  LEFT JOIN pg_stats s
     ON s.schemaname = n.nspname
     AND s.tablename = ia.stats_relname
     AND s.attname = ia.attname
@@ -172,16 +175,14 @@ SELECT
 FROM bloat_estimation be
 JOIN pg_class ct ON ct.oid = be.indrelid
 JOIN pg_namespace n ON n.oid = be.relnamespace
-WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+-- System schemas are kept here and filtered by the application (see --system).
 ORDER BY bloat_pct DESC NULLS LAST, (be.relpages * be.block_size) DESC
 `
 
 // DetectBtreeIndexBloat analyzes B-Tree indexes for bloat using catalog statistics.
 // No helper function needed — this is a pure SELECT on system catalogs.
 func DetectBtreeIndexBloat(ctx context.Context, dbConn *db.DB) ([]BloatIndex, error) {
-	if dbConn.Verbose {
-		log.Println("[INFO] Analyzing B-Tree index bloat...")
-	}
+	slog.Info("Analyzing B-Tree index bloat...")
 
 	rows, err := dbConn.Query(ctx, btreeBloatQuery)
 	if err != nil {
@@ -262,9 +263,7 @@ func DetectBtreeIndexBloat(ctx context.Context, dbConn *db.DB) ([]BloatIndex, er
 		results = append(results, idx)
 	}
 
-	if dbConn.Verbose {
-		log.Printf("[INFO] Found %d B-Tree indexes.\n", len(results))
-	}
+	slog.Info("B-Tree index analysis complete", "indexes", len(results))
 
 	return results, nil
 }

@@ -1,10 +1,11 @@
 // Package main is the entry point for the qwash application.
-// qwash is a PostgreSQL bloat analysis and reduction tool that provides
-// non-blocking table compaction without requiring extensions.
+// qwash is a single-binary PostgreSQL introspection & maintenance CLI that
+// detects and safely reduces table, index, and TOAST bloat without requiring
+// extensions.
 package main
 
 import (
-	"qwash/cmd"
+	"github.com/Alain-L/qwash/cmd"
 )
 
 // Version information (set by goreleaser at build time)

@@ -3,7 +3,8 @@ package output
 import (
 	"encoding/json"
 	"fmt"
-	"qwash/analysis"
+	"github.com/Alain-L/qwash/analysis"
+	"log/slog"
 )
 
 // BloatReport represents the JSON output structure.
@@ -23,7 +24,7 @@ func PrintBloatJSON(tableBloat []analysis.BloatTable, indexBloat []analysis.Bloa
 
 	jsonOutput, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
-		fmt.Println("[ERROR] Failed to generate JSON output:", err)
+		slog.Error("failed to generate JSON output", "error", err)
 		return
 	}
 

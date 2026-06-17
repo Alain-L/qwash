@@ -8,7 +8,7 @@
   },
   "results": [
     {
-      "table": "low_bloat",
+      "table": "public.low_bloat",
       "initial_pages": 37,
       "final_pages": 34,
       "bloat_removed_pages": 3,

@@ -8,21 +8,21 @@
   },
   "results": [
     {
-      "table": "multi_1",
+      "table": "public.multi_1",
       "initial_pages": 23,
       "final_pages": 16,
       "bloat_removed_pages": 7,
       "bloat_removed_bytes": 57344
     },
     {
-      "table": "multi_2",
+      "table": "public.multi_2",
       "initial_pages": 23,
       "final_pages": 12,
       "bloat_removed_pages": 11,
       "bloat_removed_bytes": 90112
     },
     {
-      "table": "multi_3",
+      "table": "public.multi_3",
       "initial_pages": 23,
       "final_pages": 8,
       "bloat_removed_pages": 15,

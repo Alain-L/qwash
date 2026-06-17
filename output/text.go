@@ -2,17 +2,29 @@ package output
 
 import (
 	"fmt"
-	"qwash/analysis"
+	"github.com/Alain-L/qwash/analysis"
 	"sort"
 )
 
 // PrintBloatSummary displays a textual report of table and index bloat.
 // Tables are grouped by bloat severity level with summary statistics at the top.
 func PrintBloatSummary(tableBloat []analysis.BloatTable, indexBloat []analysis.BloatIndex) {
+	// Separate tables we could estimate from those with stale/missing
+	// statistics (never analyzed): the latter cannot be estimated and must be
+	// surfaced rather than counted as "no bloat".
+	var estimated, stale []analysis.BloatTable
+	for _, tbl := range tableBloat {
+		if tbl.StaleStats {
+			stale = append(stale, tbl)
+		} else {
+			estimated = append(estimated, tbl)
+		}
+	}
+
 	// Calculate summary statistics
 	var totalDBSize, totalBloatSize int64
 	var tablesWithBloat int
-	for _, tbl := range tableBloat {
+	for _, tbl := range estimated {
 		totalDBSize += tbl.TableSize
 		totalBloatSize += tbl.BloatSize
 		if tbl.BloatRatio >= 10.0 {
@@ -24,13 +36,24 @@ func PrintBloatSummary(tableBloat []analysis.BloatTable, indexBloat []analysis.B
 	if totalDBSize > 0 {
 		totalBloatPercent = float64(totalBloatSize) * 100.0 / float64(totalDBSize)
 	}
+	withBloatPct := 0.0
+	if len(estimated) > 0 {
+		withBloatPct = float64(tablesWithBloat) * 100.0 / float64(len(estimated))
+	}
 
 	// Print summary header
-	fmt.Printf("qwash – %d tables analyzed\n\n", len(tableBloat))
+	if len(stale) > 0 {
+		fmt.Printf("qwash – %d tables analyzed (%d not estimated)\n\n", len(estimated), len(stale))
+	} else {
+		fmt.Printf("qwash – %d tables analyzed\n\n", len(estimated))
+	}
 	fmt.Println(bold("SUMMARY"))
 	fmt.Println()
-	fmt.Printf("  Tables analyzed           : %d\n", len(tableBloat))
-	fmt.Printf("  Tables with bloat         : %d (%.1f%%)\n", tablesWithBloat, float64(tablesWithBloat)*100.0/float64(len(tableBloat)))
+	fmt.Printf("  Tables analyzed           : %d\n", len(estimated))
+	fmt.Printf("  Tables with bloat         : %d (%.1f%%)\n", tablesWithBloat, withBloatPct)
+	if len(stale) > 0 {
+		fmt.Printf("  Not estimated (no stats)  : %d\n", len(stale))
+	}
 	fmt.Println()
 	fmt.Printf("  Total database size       : %s\n", FormatSize(totalDBSize))
 	fmt.Printf("  Total bloat detected      : %s (%.1f%%)\n", FormatSize(totalBloatSize), totalBloatPercent)
@@ -39,7 +62,7 @@ func PrintBloatSummary(tableBloat []analysis.BloatTable, indexBloat []analysis.B
 
 	// Group tables by bloat severity
 	var critical, high, medium []analysis.BloatTable
-	for _, tbl := range tableBloat {
+	for _, tbl := range estimated {
 		if tbl.BloatRatio >= 50.0 {
 			critical = append(critical, tbl)
 		} else if tbl.BloatRatio >= 30.0 {
@@ -140,6 +163,29 @@ func PrintBloatSummary(tableBloat []analysis.BloatTable, indexBloat []analysis.B
 		fmt.Println()
 	}
 
+	// Tables that could not be estimated (stale/missing statistics)
+	if len(stale) > 0 {
+		sort.Slice(stale, func(i, j int) bool {
+			return stale[i].Schema+"."+stale[i].TableName < stale[j].Schema+"."+stale[j].TableName
+		})
+		fmt.Println(bold("NOT ESTIMATED") + " (stale statistics)")
+		fmt.Println()
+		fmt.Printf("  %-40s %12s\n", "Table", "Size")
+		fmt.Println("  " + repeatString("-", 54))
+		for _, tbl := range stale {
+			tableName := fmt.Sprintf("%s.%s", tbl.Schema, tbl.TableName)
+			if len(tableName) > 40 {
+				tableName = tableName[:37] + "..."
+			}
+			fmt.Printf("  %-40s %12s\n", tableName, FormatSize(tbl.TableSize))
+		}
+		fmt.Println()
+		fmt.Println("  Statistics are stale or missing (never analyzed, or many dead")
+		fmt.Println("  tuples since the last VACUUM); their bloat cannot be estimated.")
+		fmt.Println("  Run VACUUM ANALYZE on them, then re-run qwash.")
+		fmt.Println()
+	}
+
 	// Display index bloat summary (if available)
 	if len(indexBloat) > 0 {
 		fmt.Println(bold("INDEX BLOAT"))
@@ -203,6 +249,17 @@ func PrintDetailedBloat(tables []analysis.BloatTable) {
 		tableName := fmt.Sprintf("%s.%s", tbl.Schema, tbl.TableName)
 		fmt.Println(tableName)
 		fmt.Println()
+		if tbl.StaleStats {
+			fmt.Printf("  Size        : %s\n", FormatSize(tbl.TableSize))
+			fmt.Printf("  Bloat       : not estimated (stale statistics)\n")
+			fmt.Printf("  Hint        : run VACUUM ANALYZE %s, then re-run qwash\n", tableName)
+			fmt.Println()
+			if i < len(tables)-1 {
+				fmt.Println("  ---")
+				fmt.Println()
+			}
+			continue
+		}
 		fmt.Printf("  Size        : %s\n", FormatSize(tbl.TableSize))
 		fmt.Printf("  Bloat       : %s\n", FormatSize(tbl.BloatSize))
 		fmt.Printf("  Bloat %%     : %.2f%%\n", tbl.BloatRatio)
@@ -323,7 +380,8 @@ func PrintIndexBloatSummary(indexes []analysis.BloatIndex) {
 			)
 		}
 		fmt.Println()
-		fmt.Println("  Columns of type \"name\" produce unreliable pg_stats estimates.")
+		fmt.Println("  Flagged when a key column is of type \"name\" or has no column")
+		fmt.Println("  statistics — run ANALYZE on the table for a reliable estimate.")
 		fmt.Println()
 	}
 }
@@ -381,7 +439,7 @@ func PrintDetailedIndexBloat(indexes []analysis.BloatIndex) {
 		fmt.Printf("  Bloat pages : %d\n", idx.BloatPages)
 		fmt.Printf("  Fill factor : %d\n", idx.FillFactor)
 		if idx.IsNA {
-			fmt.Printf("  Warning     : unreliable estimate (name column type)\n")
+			fmt.Printf("  Warning     : unreliable estimate (name column type or missing statistics)\n")
 		}
 		fmt.Println()
 
@@ -486,8 +544,8 @@ func PrintToastBloatSummary(toastBloat []analysis.ToastBloat) {
 
 	// Stale stats footnote
 	if hasStaleStats {
-		fmt.Println("  * No VACUUM in the last 24 hours — pg_class stats may be stale.")
-		fmt.Println("    Run VACUUM on these tables for accurate TOAST bloat estimation.")
+		fmt.Println("  * Dead tuples since the last VACUUM — the estimate may understate bloat.")
+		fmt.Println("    Run VACUUM on these tables for an accurate figure.")
 		fmt.Println()
 	}
 
@@ -568,6 +626,9 @@ func PrintDetailedToastBloat(toastData []analysis.ToastBloat) {
 		if tb.BloatPct != nil {
 			fmt.Printf("  Bloat       : %s\n", FormatSize(tb.BloatSize))
 			fmt.Printf("  Bloat %%     : %.2f%%\n", *tb.BloatPct)
+		} else if tb.Warning == "insufficient privilege" {
+			fmt.Printf("  Bloat       : not estimated (insufficient privilege)\n")
+			fmt.Printf("  Hint        : reading pg_toast needs table ownership or superuser\n")
 		} else if tb.Warning == "no chunks" {
 			fmt.Printf("  Bloat       : N/A (no chunks)\n")
 			fmt.Printf("  Bloat %%     : -\n")
@@ -579,7 +640,8 @@ func PrintDetailedToastBloat(toastData []analysis.ToastBloat) {
 		fmt.Printf("  Pages       : %d\n", tb.ToastPages)
 		fmt.Printf("  Chunks      : %d\n", tb.ToastChunks)
 		if tb.StaleStats {
-			fmt.Printf("  Warning     : no VACUUM in the last 24h, stats may be stale\n")
+			fmt.Printf("  Warning     : dead tuples since last VACUUM — estimate may understate\n")
+			fmt.Printf("                bloat; run VACUUM %s for an accurate figure\n", tableName)
 		}
 		fmt.Println()
 

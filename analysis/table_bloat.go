@@ -3,18 +3,16 @@ package analysis
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 
-	"qwash/db"
-	"qwash/sql"
+	"github.com/Alain-L/qwash/db"
+	"github.com/Alain-L/qwash/sql"
 )
 
 // DetectTableBloat analyzes table bloat in PostgreSQL using the embedded bloat query.
 func DetectTableBloat(ctx context.Context, dbConn *db.DB) ([]BloatTable, error) {
-	if dbConn.Verbose {
-		log.Println("[INFO] Analyzing table bloat...")
-	}
+	slog.Info("Analyzing table bloat...")
 
 	rows, err := dbConn.Query(ctx, sql.TableBloatSQL)
 	if err != nil {
@@ -26,16 +24,17 @@ func DetectTableBloat(ctx context.Context, dbConn *db.DB) ([]BloatTable, error) 
 
 	for rows.Next() {
 		var (
-			tableName       string
-			liveTup         int
-			deadTup         int64
-			minPages        int
-			actualPages     int
-			fillfactor      int
-			relationSize    string   // pg_size_pretty output
-			toastSize       string
-			bloatSizeStr    string
-			bloatPct        *float64 // nullable
+			tableName   string
+			liveTup     int
+			deadTup     int64
+			minPages    int
+			actualPages int
+			fillfactor  int
+			tableSize   int64 // relation_size, raw bytes
+			toastSize   int64 // TOAST_size, raw bytes (unused for now)
+			bloatSize   int64 // bloat_size, raw bytes
+			bloatPct    *float64
+			staleStats  bool
 		)
 
 		err := rows.Scan(
@@ -45,14 +44,16 @@ func DetectTableBloat(ctx context.Context, dbConn *db.DB) ([]BloatTable, error) 
 			&minPages,
 			&actualPages,
 			&fillfactor,
-			&relationSize,
+			&tableSize,
 			&toastSize,
-			&bloatSizeStr,
+			&bloatSize,
 			&bloatPct,
+			&staleStats,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("error scanning row: %w", err)
 		}
+		_ = toastSize // not surfaced in BloatTable yet
 
 		// Parse table_name format "schema.table"
 		parts := strings.Split(tableName, ".")
@@ -64,10 +65,6 @@ func DetectTableBloat(ctx context.Context, dbConn *db.DB) ([]BloatTable, error) 
 			schema = "public"
 			table = tableName
 		}
-
-		// Convert pg_size_pretty output to bytes (approximate for now)
-		bloatSize := parseSizeToBytes(bloatSizeStr)
-		tableSize := parseSizeToBytes(relationSize)
 
 		// Handle NULL bloatPct
 		var bloatRatio float64
@@ -86,42 +83,12 @@ func DetectTableBloat(ctx context.Context, dbConn *db.DB) ([]BloatTable, error) 
 			LiveTuples: int64(liveTup),
 			DeadTuples: deadTup,
 			FillFactor: fillfactor,
+			StaleStats: staleStats,
 		}
 
 		bloatTables = append(bloatTables, tbl)
 	}
 
-	if dbConn.Verbose {
-		log.Printf("[INFO] Found %d tables with bloat information.\n", len(bloatTables))
-	}
+	slog.Info("Table bloat analysis complete", "tables", len(bloatTables))
 	return bloatTables, nil
-}
-
-// parseSizeToBytes converts PostgreSQL pg_size_pretty output to bytes (approximate)
-func parseSizeToBytes(sizeStr string) int64 {
-	sizeStr = strings.TrimSpace(sizeStr)
-
-	// Handle "N/A" or "0 bytes"
-	if sizeStr == "N/A" || sizeStr == "0 bytes" {
-		return 0
-	}
-
-	var value float64
-	var unit string
-	fmt.Sscanf(sizeStr, "%f %s", &value, &unit)
-
-	switch strings.ToLower(unit) {
-	case "bytes":
-		return int64(value)
-	case "kb":
-		return int64(value * 1024)
-	case "mb":
-		return int64(value * 1024 * 1024)
-	case "gb":
-		return int64(value * 1024 * 1024 * 1024)
-	case "tb":
-		return int64(value * 1024 * 1024 * 1024 * 1024)
-	default:
-		return 0
-	}
 }

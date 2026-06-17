@@ -77,3 +77,10 @@ sql/_templates.go
 
 # Local test data and benchmarks
 testdata/
+
+# Local scratch / R&D notes tied to unmerged feature branches
+# (CLUSTER -> feature/cluster, DEMO & TESTS -> feature/toast, FEEDBACK -> user notes)
+CLUSTER.md
+DEMO.md
+FEEDBACK.md
+TESTS.md
