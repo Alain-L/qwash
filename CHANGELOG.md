@@ -14,6 +14,7 @@ All notable changes to this project will be documented in this file.
 - System tables could be debloated without `--system` via `-t pg_catalog.x` or `-n pg_catalog`.
 - A table with stale statistics was rewritten for nothing (bigger afterwards, heavy WAL); compaction now stops on a table when rows keep moving to higher pages.
 - Errors raised mid-result were ignored, giving truncated reports with exit code `0`; a role without `USAGE` on any schema could not estimate at all.
+- Tables whose statistics no longer describe them are flagged "not estimated" instead of reported heavily bloated: changed more than autovacuum's ANALYZE threshold since the last ANALYZE, or never analyzed (no `pg_stats` row).
 - The test suite dropped the database named by `PGDATABASE`; it now always uses `qwash_test`.
 
 ## [0.5.0] - 2026-06-17

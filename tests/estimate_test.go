@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Alain-L/qwash/db"
 )
 
 var ctx = context.Background()
@@ -581,5 +583,97 @@ func TestEstimateSchemaWithoutUsage(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("public.usage_visible missing from the report\nOutput: %s", output)
+	}
+}
+
+// estimateOne runs --estimate --json on a single table and returns its entry.
+func estimateOne(t *testing.T, table string) (stale bool, output string) {
+	output, err := runQwashCLI(t, "--estimate", "-t", table, "--json")
+	if err != nil {
+		t.Fatalf("CLI failed: %v\nOutput: %s", err, output)
+	}
+	var result EstimateJSON
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("Failed to parse JSON: %v\nOutput: %s", err, output)
+	}
+	if len(result.Tables) != 1 {
+		t.Fatalf("Expected 1 table in output, got %d\nOutput: %s", len(result.Tables), output)
+	}
+	return result.Tables[0].StaleStats, output
+}
+
+// TestEstimateStaleAfterGrowth verifies that a table changed a lot since its
+// last ANALYZE is flagged stale (regression test: analyzed with short rows,
+// then filled with long ones and vacuumed, it was reported ~87% bloated while
+// it had no bloat at all).
+func TestEstimateStaleAfterGrowth(t *testing.T) {
+	conn := setupTestDB(t)
+	for _, q := range []string{
+		"CREATE TABLE grown_est (id serial PRIMARY KEY, v text) WITH (autovacuum_enabled = false)",
+		"INSERT INTO grown_est (v) SELECT 'x' FROM generate_series(1, 1000)",
+		"ANALYZE grown_est",
+		"INSERT INTO grown_est (v) SELECT repeat('y', 300) FROM generate_series(1, 30000)",
+		"VACUUM grown_est",
+	} {
+		if _, err := conn.Exec(ctx, q); err != nil {
+			t.Fatalf("setup failed on %q: %v", q, err)
+		}
+	}
+	conn.Close()
+
+	// Table counters reach the statistics system asynchronously; poll.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		stale, output := estimateOne(t, "grown_est")
+		if stale {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Table changed since its last ANALYZE must be flagged stale\nOutput: %s", output)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// TestEstimateStaleNeverAnalyzed verifies that a vacuumed but never analyzed
+// table is flagged stale even once the activity counters are gone (after
+// pg_stat_reset() or a crash), from the absence of any pg_stats row
+// (regression test: it was reported ~80% bloated).
+func TestEstimateStaleNeverAnalyzed(t *testing.T) {
+	conn := setupTestDB(t)
+	for _, q := range []string{
+		"CREATE TABLE vaconly_est (id int, v text) WITH (autovacuum_enabled = false)",
+		"INSERT INTO vaconly_est SELECT g, repeat('z', 100) FROM generate_series(1, 20000) g",
+		"VACUUM vaconly_est",
+	} {
+		if _, err := conn.Exec(ctx, q); err != nil {
+			t.Fatalf("setup failed on %q: %v", q, err)
+		}
+	}
+	conn.Close() // flushes this session's pending counters
+
+	// Reset the counters until the INSERTs no longer show in
+	// n_mod_since_analyze, so only the missing pg_stats can flag the table.
+	admin, err := db.Connect(getTestConfig(), false)
+	if err != nil {
+		t.Fatalf("Failed to reconnect: %v", err)
+	}
+	defer admin.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var mods int64
+		admin.Exec(ctx, "SELECT pg_stat_reset()")
+		if err := admin.QueryRow(ctx, `SELECT coalesce(n_mod_since_analyze, 0)
+			FROM pg_stat_user_tables WHERE relname = 'vaconly_est'`).Scan(&mods); err == nil && mods == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("n_mod_since_analyze never went back to 0 after pg_stat_reset()")
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	if stale, output := estimateOne(t, "vaconly_est"); !stale {
+		t.Errorf("Never-analyzed table must be flagged stale\nOutput: %s", output)
 	}
 }
