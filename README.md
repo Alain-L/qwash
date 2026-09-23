@@ -3,7 +3,7 @@
 **qwash** is a single-binary PostgreSQL introspection & maintenance CLI — no extensions required. It detects and safely reduces table, index, and TOAST bloat **using regular DML operations** instead of a long exclusive lock (unlike `VACUUM FULL`), making it suitable for production use (see [Operational Caveats](#operational-caveats)).
 
 qwash is a **standalone tool** that combines bloat estimation and reduction in a single binary:
-- **No extensions required** — works with any PostgreSQL 9.6+ installation
+- **No extensions required** — estimation works on PostgreSQL 9.6+, debloat on PostgreSQL 12+
 - **No external dependencies** — no Perl, Python, or `pgstattuple` needed
 - **Estimate then debloat** — analyze bloat first, then reduce it based on results
 
@@ -63,7 +63,7 @@ go build -o bin/qwash
 
 ### Requirements
 
-- PostgreSQL 9.6+
+- PostgreSQL 9.6+ for estimation; PostgreSQL 12+ for `--debloat` and `--reindex` (continuous integration covers 14 to 18)
 - For `--debloat`: a superuser role (PostgreSQL < 15) or a role granted `SET` on `session_replication_role` (PostgreSQL 15+), which must also **own the target tables** so that `VACUUM` can reclaim the freed pages
 - For `--debloat`: a direct connection (no transaction-pooling pgbouncer; qwash relies on session state)
 
@@ -120,8 +120,9 @@ parameters not given on the command line are resolved like psql would, from
 # Dry-run (preview without changes)
 ./bin/qwash --debloat -d mydb -t mytable --dry-run
 
-# Stop after reducing 500MB of bloat
-./bin/qwash --debloat -d mydb -t mytable --limit 500MB
+# Stop after reducing 500MB of bloat (checked between tables: the table in
+# progress is always finished, so the limit can be exceeded)
+./bin/qwash --debloat -d mydb --all --limit 500MB
 
 # Rebuild indexes after debloat
 ./bin/qwash --debloat -d mydb -t mytable --reindex
@@ -202,6 +203,14 @@ The difference is the estimated bloat.
 **TOAST bloat** (`--toast`) uses a similar approach: it compares actual TOAST pages with the theoretical minimum based on live chunk count and average chunk size measured directly on the TOAST chunks (no detoasting). Estimation is reliable for TOAST tables >= 10 MB and requires recent `VACUUM` for accurate stats. A [standalone query](sql/toast_bloat.sql) is available for DBA use without installing qwash.
 
 **B-Tree index bloat** (`--btree`) follows the same ioguix methodology adapted for indexes: it derives the theoretical minimum number of pages from `pg_stats` (`avg_width`, `null_frac`) and B-Tree page overhead (page header, opaque, item pointers, tuple header, MAXALIGN padding) and compares it to the actual `relpages` count. Indexes whose key columns include a `name`-typed column are flagged as **unreliable** (`is_na = true`) because `pg_stats` returns inaccurate widths for that type. A [standalone query](sql/btree_bloat.sql) is also available for DBA use.
+
+**These are estimates, not measurements.** They are only as good as the statistics they read, which is why tables with stale, missing or unreadable statistics are listed as *not estimated* instead of given a figure. Known biases:
+
+- **Heap**: column alignment padding and the NULL bitmap are approximated, which can shift the figure by a few points on wide tables.
+- **TOAST**: the theoretical minimum assumes chunks pack pages perfectly, so the estimate can report bloat that no rewrite would reclaim.
+- **B-Tree**: deduplication (PostgreSQL 13+) is not modeled, so indexes with many duplicate keys can have their bloat *under*-estimated.
+
+For an exact figure on a given relation, use `pgstattuple` / `pgstatindex`.
 
 ### Bloat Reduction Algorithm
 
