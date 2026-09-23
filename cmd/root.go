@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -52,15 +53,16 @@ var (
 	btreeFlag bool // --btree
 
 	// Debloat options
-	debloatFlag bool   // --debloat (-B)
-	allFlag     bool   // --all (debloat every table when no -t is given)
-	fastFlag    bool   // --fast
-	slowFlag    bool   // --slow (1 page at a time with delay)
-	delayMs     int    // --delay (milliseconds between operations in slow mode)
-	dryRunFlag  bool   // --dry-run
-	reindexFlag bool   // --reindex
-	limitStr    string // --limit (stop after reducing X bloat: 500MB, 1GB, 50%)
-	jobsFlag    int    // --jobs (-j) number of parallel workers (0 = auto)
+	debloatFlag   bool   // --debloat (-B)
+	allFlag       bool   // --all (debloat every table when no -t is given)
+	fastFlag      bool   // --fast
+	slowFlag      bool   // --slow (1 page at a time with delay)
+	delayMs       int    // --delay (milliseconds between operations in slow mode)
+	dryRunFlag    bool   // --dry-run
+	reindexFlag   bool   // --reindex
+	noAnalyzeFlag bool   // --no-analyze
+	limitStr      string // --limit (stop after reducing X bloat: 500MB, 1GB, 50%)
+	jobsFlag      int    // --jobs (-j) number of parallel workers (0 = auto)
 
 	// Output options
 	verboseFlag bool // --verbose
@@ -161,6 +163,8 @@ func init() {
 		"Delay in milliseconds between page rounds in slow mode")
 	rootCmd.PersistentFlags().BoolVar(&dryRunFlag, "dry-run", false,
 		"Show what would be done without making changes")
+	rootCmd.PersistentFlags().BoolVar(&noAnalyzeFlag, "no-analyze", false,
+		"Do not ANALYZE target tables before estimating their bloat")
 	rootCmd.PersistentFlags().BoolVar(&reindexFlag, "reindex", false,
 		"Rebuild indexes after debloat (REINDEX CONCURRENTLY)")
 	rootCmd.PersistentFlags().StringVar(&limitStr, "limit", "",
@@ -605,6 +609,17 @@ func runDebloat(ctx context.Context, connection *db.DB) {
 		return
 	}
 
+	// Refresh the statistics the estimate is built on: stale ones make it
+	// wrong, and a wrong estimate sends the compaction after space that is
+	// not there. ANALYZE only samples the table and blocks no reads or writes.
+	if !noAnalyzeFlag {
+		for _, table := range tables {
+			if err := connection.AnalyzeTable(ctx, table); err != nil {
+				slog.Warn("ANALYZE failed, the bloat estimate may be stale", "table", table, "error", err)
+			}
+		}
+	}
+
 	// Estimate bloat for the whole database in a single catalog-wide scan,
 	// then look results up per table. Running the bloat query once (instead of
 	// once per table, and again per compaction pass) avoids quadratic cost on
@@ -1019,6 +1034,14 @@ func processTable(ctx context.Context, connection *db.DB, table string, bloatPag
 		if compactErr != nil {
 			break
 		}
+	}
+
+	// Running out of free space is not a failure: the table is consistent
+	// and whatever could be reclaimed was. Further passes would not help.
+	if errors.Is(compactErr, db.ErrNoFreeSpace) {
+		slog.Warn("compaction stopped early: rows kept moving up, no free space left below "+
+			"(the bloat estimate may be off, or a long-running transaction may be holding dead rows)", "table", table, "reason", compactErr)
+		compactErr = nil
 	}
 
 	if compactErr != nil {

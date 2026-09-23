@@ -361,6 +361,19 @@ func (db *DB) estimateTargetPages(tableName string) (int, error) {
 	return toPage, nil
 }
 
+// ErrNoFreeSpace reports that a compaction stopped early because rows kept
+// moving to pages above the one being compacted, even right after a VACUUM:
+// there is no free space left below it to receive them.
+var ErrNoFreeSpace = errors.New("no free space left below the pages being compacted")
+
+// AnalyzeTable refreshes the planner statistics of an already-resolved table.
+// The bloat estimate is derived from them (reltuples, pg_stats), so running it
+// right before a debloat keeps a stale estimate from driving the compaction.
+func (db *DB) AnalyzeTable(ctx context.Context, tableName string) error {
+	_, err := db.conn.Exec(ctx, fmt.Sprintf("ANALYZE %s", sanitizeTableName(tableName)))
+	return err
+}
+
 // compactToTarget runs the UPDATE-based compaction on an already-resolved
 // table down to the given target page count. The context cancels the loop
 // between page rounds and aborts the in-flight statement.
@@ -467,6 +480,8 @@ func (db *DB) compactToTarget(ctx context.Context, tableName string, toPage int)
 	pagesProcessed := 0
 	pagesSinceVacuum := 0
 	currentPage := initialPages - 1 // Start from last page (0-indexed)
+	vacuumedAfterMoveUp := false    // a VACUUM already followed rows moving up
+	stoppedAt := -1                 // page where the loop gave up (no free space)
 
 	for currentPage > toPage {
 		// Stop promptly on cancellation (Ctrl-C): the page just processed is
@@ -486,9 +501,25 @@ func (db *DB) compactToTarget(ctx context.Context, tableName string, toPage int)
 			return fmt.Errorf("procedure call failed at page %d: %w", currentPage, err)
 		}
 
-		if resultPage == -1 && db.Verbose {
-			fmt.Printf("\n  Warning: tuples moved to higher page at page %d\n", currentPage)
-		} else if resultPage == -2 && db.Verbose {
+		// -1: rows landed above the page instead of below it. The free space
+		// map is only refreshed by VACUUM, so vacuum once and retry the page.
+		// If rows still move up, the space really is not there (the estimate
+		// was wrong, or an old snapshot keeps dead rows alive): going on would
+		// only rewrite rows and grow the table.
+		if resultPage == -1 {
+			if vacuumedAfterMoveUp {
+				stoppedAt = currentPage
+				break
+			}
+			if _, err = db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s", sanitizeTableName(tableName))); err != nil {
+				return fmt.Errorf("VACUUM failed at page %d: %w", currentPage, err)
+			}
+			pagesSinceVacuum = 0
+			vacuumedAfterMoveUp = true
+			continue
+		}
+		vacuumedAfterMoveUp = false
+		if resultPage == -2 && db.Verbose {
 			fmt.Printf("\n  Warning: max loops reached at page %d\n", currentPage)
 		}
 
@@ -548,6 +579,9 @@ func (db *DB) compactToTarget(ctx context.Context, tableName string, toPage int)
 			initialPages, finalPages, pagesProcessed)
 	}
 
+	if stoppedAt >= 0 {
+		return fmt.Errorf("%w (page %d)", ErrNoFreeSpace, stoppedAt)
+	}
 	return nil
 }
 

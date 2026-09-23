@@ -162,6 +162,7 @@ Debloat:
   -j, --jobs int          Parallel workers (default: 2, 4 with --fast, 1 with --slow)
       --dry-run           Preview changes without applying them
       --reindex           Rebuild indexes after debloat (REINDEX CONCURRENTLY)
+      --no-analyze        Do not ANALYZE target tables before estimating their bloat
       --limit string      Stop after reducing X bloat (e.g., 500MB, 1GB, 50%)
 
 Output:
@@ -206,10 +207,13 @@ The difference is the estimated bloat.
 
 The debloat algorithm is inspired by [pgcompacttable](https://github.com/dataegret/pgcompacttable) but uses an **UPDATE-based compaction** approach via a temporary stored procedure:
 
-1. Create a procedure that updates rows from the last N pages (`UPDATE SET col = col`)
-2. PostgreSQL rewrites these tuples, placing them in earlier free space (HOT updates are bypassed)
-3. Run `VACUUM` to release the now-empty pages at the end
-4. Repeat until bloat is minimized
+1. Run `ANALYZE` on the target tables, so the bloat estimate that sets the compaction target rests on fresh statistics (disable with `--no-analyze`; this also applies to `--dry-run`)
+2. Create a procedure that updates rows from the last N pages (`UPDATE SET col = col`)
+3. PostgreSQL rewrites these tuples, placing them in earlier free space (HOT updates are bypassed)
+4. Run `VACUUM` to release the now-empty pages at the end
+5. Repeat until bloat is minimized
+
+If rows keep landing *above* the page being compacted even right after a `VACUUM`, there is no free space left below it: qwash stops on that table with a warning instead of rewriting it for nothing. The usual causes are a long-running transaction holding dead rows, or an estimate that was off.
 
 This approach:
 - **Lets writes keep flowing** — compaction uses regular `UPDATE`s (row-level locking only); the only exclusive lock is the brief one `VACUUM` takes to truncate empty pages at the end of the file
