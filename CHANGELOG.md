@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- `--debloat` runs `ANALYZE` on the target tables before estimating their bloat (`--no-analyze` to opt out); this also applies to `--dry-run`.
+- `Ctrl-C` cancels the running statement on the server (was: only closed the connection) and exits `130`, naming the tables not processed.
+- `--system` confirmation goes to stderr, is skipped in `--dry-run`, and fails when stdin is not a terminal.
+- Built with a supported Go release; pgx 5.11; `govulncheck` in CI.
+
+### Fixed
+- System tables could be debloated without `--system` via `-t pg_catalog.x` or `-n pg_catalog`.
+- A table with stale statistics was rewritten for nothing (bigger afterwards, heavy WAL); compaction now stops on a table when rows keep moving to higher pages.
+- Errors raised mid-result were ignored, giving truncated reports with exit code `0`; a role without `USAGE` on any schema could not estimate at all.
+- The test suite dropped the database named by `PGDATABASE`; it now always uses `qwash_test`.
+
 ## [0.5.0] - 2026-06-17
 
 > Full commit list on the GitHub release page.
