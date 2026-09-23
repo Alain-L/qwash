@@ -142,8 +142,10 @@ SELECT
   estimated_min_pages AS min_pages_required,
   actual_pages,
   fillfactor,
-  pg_relation_size(format('%I.%I', schemaname, tblname)::regclass)::bigint
-    AS relation_size,
+  -- Size by OID, not by name: casting a 'schema.table' string to regclass
+  -- requires USAGE on the schema and would abort the whole query for a role
+  -- lacking it, even though that table's own row is all that is affected.
+  pg_relation_size(table_oid)::bigint AS relation_size,
   CASE WHEN reltoastrelid <> 0
        THEN pg_relation_size(reltoastrelid::regclass)
        ELSE 0
@@ -167,7 +169,7 @@ SELECT
   -- n_dead_tup is the same signal autovacuum uses to decide a VACUUM is due.
   (reltuples < 0
    OR (actual_pages = 0
-       AND pg_relation_size(format('%I.%I', schemaname, tblname)::regclass) > 0)
+       AND pg_relation_size(table_oid) > 0)
    OR (COALESCE(n_dead_tup, 0) > 0
        AND COALESCE(n_dead_tup, 0)::float8
            / NULLIF(COALESCE(n_live_tup, 0) + COALESCE(n_dead_tup, 0), 0) > 0.05)

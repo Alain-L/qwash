@@ -262,6 +262,9 @@ func DetectBtreeIndexBloat(ctx context.Context, dbConn *db.DB) ([]BloatIndex, er
 
 		results = append(results, idx)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error reading index bloat rows: %w", err)
+	}
 
 	slog.Info("B-Tree index analysis complete", "indexes", len(results))
 

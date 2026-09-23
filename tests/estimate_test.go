@@ -536,3 +536,50 @@ func TestEstimateDefaultBehavior(t *testing.T) {
 		t.Logf("Default mode should show estimate results. Output: %s", output)
 	}
 }
+
+// TestEstimateSchemaWithoutUsage verifies that a role lacking USAGE on one
+// schema still gets a complete report for the tables it can reach. The heap
+// query used to cast 'schema.table' strings to regclass, which fails without
+// USAGE; the error surfaced mid-stream and the report came out truncated with
+// exit code 0.
+func TestEstimateSchemaWithoutUsage(t *testing.T) {
+	admin := setupTestDB(t)
+	createBloatedTable(t, admin, "usage_visible", 1000, 50)
+	if _, err := admin.Exec(ctx, `
+		CREATE SCHEMA usage_hidden;
+		CREATE TABLE usage_hidden.secret (id int);
+		INSERT INTO usage_hidden.secret SELECT generate_series(1, 1000);
+		ANALYZE usage_hidden.secret;
+		DROP ROLE IF EXISTS qwash_usage_lim;
+		CREATE ROLE qwash_usage_lim LOGIN PASSWORD 'lim';
+		GRANT USAGE ON SCHEMA public TO qwash_usage_lim;
+		GRANT SELECT ON usage_visible TO qwash_usage_lim;
+	`); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	defer func() {
+		admin.Exec(ctx, "DROP SCHEMA usage_hidden CASCADE")
+		admin.Exec(ctx, "REVOKE ALL ON usage_visible FROM qwash_usage_lim")
+		admin.Exec(ctx, "REVOKE ALL ON SCHEMA public FROM qwash_usage_lim")
+		admin.Exec(ctx, "DROP ROLE IF EXISTS qwash_usage_lim")
+		admin.Close()
+	}()
+
+	output, err := runQwashCLIAs(t, "qwash_usage_lim", "lim", "--estimate", "--json")
+	if err != nil {
+		t.Fatalf("Estimate should succeed without USAGE on an unrelated schema: %v\nOutput: %s", err, output)
+	}
+	var result EstimateJSON
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("Failed to parse JSON: %v\nOutput: %s", err, output)
+	}
+	found := false
+	for _, tbl := range result.Tables {
+		if tbl.Schema == "public" && tbl.TableName == "usage_visible" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("public.usage_visible missing from the report\nOutput: %s", output)
+	}
+}

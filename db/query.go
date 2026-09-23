@@ -103,6 +103,9 @@ func (db *DB) checkLongTransactions() (string, error) {
 		}
 		warnings = append(warnings, fmt.Sprintf("%s/%s (%.0fmin, %s)", userName, appName, ageMinutes, state))
 	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("failed to check transactions: %w", err)
+	}
 
 	if len(warnings) > 0 {
 		return fmt.Sprintf("long-running transactions may block VACUUM: %s", strings.Join(warnings, ", ")), nil
@@ -205,6 +208,9 @@ func (db *DB) ListDatabases() ([]string, error) {
 			return nil, fmt.Errorf("error scanning database name: %w", err)
 		}
 		databases = append(databases, dbname)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error reading database names: %w", err)
 	}
 	return databases, nil
 }
@@ -798,6 +804,9 @@ func (db *DB) ListTablesFiltered(schemas []string, includeSystem bool, excludeTa
 			return nil, fmt.Errorf("error scanning table name: %w", err)
 		}
 		tables = append(tables, tableName)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error reading table names: %w", err)
 	}
 	return tables, nil
 }

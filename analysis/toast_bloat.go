@@ -215,6 +215,9 @@ func DetectToastBloat(ctx context.Context, dbConn *db.DB) ([]ToastBloat, error) 
 
 		results = append(results, tb)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error reading TOAST bloat rows: %w", err)
+	}
 
 	slog.Info("TOAST bloat analysis complete", "tables", len(results))
 

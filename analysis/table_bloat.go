@@ -88,6 +88,9 @@ func DetectTableBloat(ctx context.Context, dbConn *db.DB) ([]BloatTable, error) 
 
 		bloatTables = append(bloatTables, tbl)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error reading table bloat rows: %w", err)
+	}
 
 	slog.Info("Table bloat analysis complete", "tables", len(bloatTables))
 	return bloatTables, nil

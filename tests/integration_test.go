@@ -223,6 +223,24 @@ func runQwashCLI(t *testing.T, args ...string) (string, error) {
 	return string(output), err
 }
 
+// runQwashCLIAs runs the qwash binary like runQwashCLI, but connected as the
+// given role instead of the test superuser.
+func runQwashCLIAs(t *testing.T, user, password string, args ...string) (string, error) {
+	cfg := getTestConfig()
+	allArgs := append([]string{
+		"-h", cfg.Host,
+		"-p", cfg.Port,
+		"-U", user,
+		"-d", cfg.Database,
+		"--sslmode", cfg.SSLMode,
+	}, args...)
+	cmd := exec.Command("./bin/qwash", allArgs...)
+	cmd.Dir = ".." // Run from project root
+	cmd.Env = append(os.Environ(), "PGPASSWORD="+password)
+	output, err := cmd.CombinedOutput()
+	return string(output), err
+}
+
 // TestCLIConnectionFromEnvironment verifies that the binary follows the
 // standard PostgreSQL client conventions: PG* environment variables are
 // honored when no connection flag is given (regression test: they used to
