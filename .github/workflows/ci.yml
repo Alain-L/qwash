@@ -55,6 +55,9 @@ jobs:
           go vet ./...
           staticcheck ./...
 
+      - name: Check for known vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
       - name: Build
         run: go build -v .
 
