@@ -112,6 +112,5 @@ jobs:
           PGPORT: 5432
           PGUSER: postgres
           PGPASSWORD: postgres
-          PGDATABASE: qwash_test
           PGSSLMODE: disable
         run: go test -race -v ./tests/... -timeout 15m
