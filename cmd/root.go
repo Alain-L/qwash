@@ -556,16 +556,20 @@ func filterIndexByTable(indexes []analysis.BloatIndex, targetNames []string) []a
 // runDebloat executes the bloat reduction process
 func runDebloat(ctx context.Context, connection *db.DB) {
 	// Warning for system tables
-	if systemFlag {
-		fmt.Println("WARNING: You are about to debloat system tables!")
-		fmt.Println("This can be dangerous and may affect database stability.")
-		fmt.Print("Are you sure you want to continue? [y/N]: ")
+	// The prompt goes to stderr so it never mixes with --json output, and is
+	// skipped in dry-run, which changes nothing.
+	if systemFlag && !dryRunFlag {
+		if !term.IsTerminal(int(os.Stdin.Fd())) {
+			fatal("--system requires an interactive confirmation (stdin is not a terminal)")
+		}
+		fmt.Fprintln(os.Stderr, "WARNING: You are about to debloat system tables!")
+		fmt.Fprintln(os.Stderr, "This can be dangerous and may affect database stability.")
+		fmt.Fprint(os.Stderr, "Are you sure you want to continue? [y/N]: ")
 
 		var response string
 		fmt.Scanln(&response)
 		if response != "y" && response != "Y" {
-			fmt.Println("Aborted.")
-			return
+			fatal("aborted by user")
 		}
 	}
 
@@ -905,23 +909,33 @@ func getTargetTables(connection *db.DB) ([]string, error) {
 	// consumer — estimation, advisory lock, DML — designates the same
 	// relation. This also fails fast on tables that don't exist, instead
 	// of reporting a confusing per-table error later.
+	var tables []string
 	if len(targetTables) > 0 {
-		resolved := make([]string, 0, len(targetTables))
 		for _, t := range targetTables {
 			qualified, err := connection.ResolveTableName(t)
 			if err != nil {
 				return nil, err
 			}
-			resolved = append(resolved, qualified)
+			tables = append(tables, qualified)
 		}
-		return resolved, nil
+	} else {
+		// Otherwise, get all tables (filtered by schema if specified);
+		// ListTablesFiltered already returns schema-qualified names.
+		var err error
+		tables, err = connection.ListTablesFiltered(targetSchemas, systemFlag, excludeTbl)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	// Otherwise, get all tables (filtered by schema if specified);
-	// ListTablesFiltered already returns schema-qualified names.
-	tables, err := connection.ListTablesFiltered(targetSchemas, systemFlag, excludeTbl)
-	if err != nil {
-		return nil, err
+	// Rewriting catalog rows is only ever done with --system (and its
+	// confirmation), whether the table was named with -t or reached via -n.
+	if !systemFlag {
+		for _, t := range tables {
+			if db.IsSystemTable(t) {
+				return nil, fmt.Errorf("%s is a system table: use --system to debloat system tables", t)
+			}
+		}
 	}
 
 	return tables, nil

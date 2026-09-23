@@ -752,6 +752,21 @@ func (db *DB) DebloatPreflight(tableName string) (warnings []string, err error) 
 	return warnings, nil
 }
 
+// systemSchemas are the schemas holding PostgreSQL's own catalogs. Their
+// tables are only ever targeted when --system is given.
+var systemSchemas = []string{"pg_catalog", "pg_toast", "information_schema"}
+
+// IsSystemTable reports whether a schema-qualified "schema.table" name lives
+// in one of the systemSchemas.
+func IsSystemTable(qualified string) bool {
+	for _, s := range systemSchemas {
+		if strings.HasPrefix(qualified, s+".") {
+			return true
+		}
+	}
+	return false
+}
+
 // ListTablesFiltered returns tables filtered by schemas, system flag, and exclusion list.
 // Returned names are schema-qualified ("schema.table"). Exclusions match
 // either the bare table name or its qualified form. All user-provided values
@@ -769,7 +784,8 @@ func (db *DB) ListTablesFiltered(schemas []string, includeSystem bool, excludeTa
 		conditions = append(conditions, fmt.Sprintf("n.nspname = ANY($%d)", len(args)))
 	} else if !includeSystem {
 		// Exclude system schemas by default
-		conditions = append(conditions, "n.nspname NOT IN ('pg_catalog', 'pg_toast', 'information_schema')")
+		args = append(args, systemSchemas)
+		conditions = append(conditions, fmt.Sprintf("NOT (n.nspname = ANY($%d))", len(args)))
 	}
 
 	// Exclude specific tables (bare or schema-qualified names)
