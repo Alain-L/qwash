@@ -120,10 +120,22 @@ func (db *DB) setLockTimeout(ctx context.Context) error {
 	return err
 }
 
-// resetLockTimeout restores the lock timeout to its default. RESET (rather
-// than SET ... = 0) preserves any value configured server-side.
-func (db *DB) resetLockTimeout(ctx context.Context) {
-	db.conn.Exec(ctx, "RESET lock_timeout")
+// cleanupTimeout bounds each cleanup statement run by execCleanup.
+const cleanupTimeout = 30 * time.Second
+
+// cleanupContext returns the context for cleanup statements. They must not
+// use the operation's context: after a Ctrl-C it is already canceled and the
+// statement would never be sent. The timeout keeps an unresponsive server
+// from hanging the exit.
+func cleanupContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), cleanupTimeout)
+}
+
+// execCleanup runs a best-effort cleanup statement on a cleanupContext.
+func (db *DB) execCleanup(query string) {
+	ctx, cancel := cleanupContext()
+	defer cancel()
+	db.conn.Exec(ctx, query)
 }
 
 // Exec executes a query without returning rows.
@@ -398,7 +410,8 @@ func (db *DB) compactToTarget(ctx context.Context, tableName string, toPage int)
 	if err := db.setLockTimeout(ctx); err != nil {
 		return fmt.Errorf("failed to set lock timeout: %w", err)
 	}
-	defer db.resetLockTimeout(ctx)
+	// RESET (rather than SET ... = 0) preserves any value configured server-side.
+	defer db.execCleanup("RESET lock_timeout")
 
 	// Acquire advisory lock to prevent concurrent compaction
 	locked, err := db.acquireTableLock(tableName)
@@ -427,7 +440,7 @@ func (db *DB) compactToTarget(ctx context.Context, tableName string, toPage int)
 	if err != nil {
 		return fmt.Errorf("failed to set session_replication_role: %w", err)
 	}
-	defer db.conn.Exec(ctx, "SET session_replication_role = DEFAULT")
+	defer db.execCleanup("SET session_replication_role = DEFAULT")
 
 	// Get the current page count (a cheap pg_class lookup) to know where the
 	// page loop starts; the target page count was supplied by the caller.
@@ -456,7 +469,7 @@ func (db *DB) compactToTarget(ctx context.Context, tableName string, toPage int)
 	if err != nil {
 		return fmt.Errorf("failed to create procedure: %w", err)
 	}
-	defer db.conn.Exec(ctx, fmt.Sprintf("DROP FUNCTION IF EXISTS %s(text,text,integer,integer,integer)", procName))
+	defer db.execCleanup(fmt.Sprintf("DROP FUNCTION IF EXISTS %s(text,text,integer,integer,integer)", procName))
 
 	// Initial VACUUM to establish baseline
 	_, err = db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s", sanitizeTableName(tableName)))
@@ -943,7 +956,9 @@ func (db *DB) ReindexTable(ctx context.Context, tableName string) error {
 	if err != nil {
 		// No blocking fallback. Clean up any invalid leftovers from the failed
 		// concurrent rebuild so they don't pile up across runs.
-		if cleaned := db.dropInvalidReindexLeftovers(ctx, tableName); cleaned != "" {
+		cleanupCtx, cancel := cleanupContext()
+		defer cancel()
+		if cleaned := db.dropInvalidReindexLeftovers(cleanupCtx, tableName); cleaned != "" {
 			return fmt.Errorf("REINDEX CONCURRENTLY failed (%w); cleaned up leftover invalid index(es): %s", err, cleaned)
 		}
 		return fmt.Errorf("REINDEX CONCURRENTLY failed: %w", err)

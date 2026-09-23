@@ -83,6 +83,7 @@ It provides estimation, reporting, and optionally helps remove unnecessary bloat
 //	0 = success
 //	1 = fatal error (set via fatal(); e.g. bad flags, connection failure)
 //	2 = completed with per-table errors (some tables could not be processed)
+//	130 = debloat interrupted (Ctrl-C / SIGTERM) before completion
 //
 // It is applied in Execute() after the command returns, so that deferred
 // cleanup (connection close) still runs before the process exits.
@@ -614,7 +615,11 @@ func runDebloat(ctx context.Context, connection *db.DB) {
 	// not there. ANALYZE only samples the table and blocks no reads or writes.
 	if !noAnalyzeFlag {
 		for _, table := range tables {
-			if err := connection.AnalyzeTable(ctx, table); err != nil {
+			err := connection.AnalyzeTable(ctx, table)
+			if ctx.Err() != nil {
+				break // interrupted: reported with the results below
+			}
+			if err != nil {
 				slog.Warn("ANALYZE failed, the bloat estimate may be stale", "table", table, "error", err)
 			}
 		}
@@ -733,6 +738,26 @@ func runDebloat(ctx context.Context, connection *db.DB) {
 			exitCode = 2
 			break
 		}
+	}
+
+	// An interrupted run is not a success, whatever the tables already done:
+	// exit 130 (128 + SIGINT, the shell convention) and name the tables that
+	// were never started, so a rerun can pick them up.
+	if ctx.Err() != nil {
+		started := make(map[string]bool, len(results))
+		for _, r := range results {
+			started[r.Table] = true
+		}
+		var notStarted []string
+		for _, t := range tables {
+			if !started[t] {
+				notStarted = append(notStarted, t)
+			}
+		}
+		if len(notStarted) > 0 {
+			slog.Warn("interrupted; these tables were not processed", "tables", strings.Join(notStarted, ", "))
+		}
+		exitCode = 130
 	}
 }
 

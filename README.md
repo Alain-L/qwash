@@ -237,9 +237,9 @@ warrant attention:
 - **WAL and logical replication** — every moved row is written to WAL (volume ≈ data moved) and **decoded by logical replication**: expect subscriber traffic and lag proportional to the bloat being removed (qwash warns when the table is published).
 - **Connection pooling** — connect **directly** to PostgreSQL. Through a transaction-pooling pgbouncer, the session-level protections (`session_replication_role`, `lock_timeout`, advisory locks) may land on different backends and silently stop working.
 - **Statistics matter** — the bloat estimation is based on `pg_stats`/`pg_class`; run `ANALYZE` (and ideally `VACUUM`) on the target tables first if their statistics are stale.
-- **Interruptions** — `Ctrl-C` stops cleanly between pages: the page in progress rolls back, already-compacted pages stay. `--reindex` uses `REINDEX CONCURRENTLY` only (PostgreSQL 12+) and never falls back to a blocking `REINDEX`.
+- **Interruptions** — `Ctrl-C` asks the server to cancel the statement in progress (the page being compacted rolls back; already-compacted pages stay), restores the session settings, then exits with code `130` and lists the tables it did not get to. `--reindex` uses `REINDEX CONCURRENTLY` only (PostgreSQL 12+) and never falls back to a blocking `REINDEX`.
 
-**Exit codes** (for automation): `0` success · `1` fatal error (bad flags, connection failure, unknown `-t` table) · `2` completed with per-table failures.
+**Exit codes** (for automation): `0` success · `1` fatal error (bad flags, connection failure, unknown `-t` table) · `2` completed with per-table failures · `130` debloat interrupted (`Ctrl-C`/`SIGTERM`).
 
 ### Debloat Modes
 
