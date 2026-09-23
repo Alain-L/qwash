@@ -15,6 +15,7 @@ All notable changes to this project will be documented in this file.
 - A table with stale statistics was rewritten for nothing (bigger afterwards, heavy WAL); compaction now stops on a table when rows keep moving to higher pages.
 - Errors raised mid-result were ignored, giving truncated reports with exit code `0`; a role without `USAGE` on any schema could not estimate at all.
 - Tables whose statistics no longer describe them are flagged "not estimated" instead of reported heavily bloated: changed more than autovacuum's ANALYZE threshold since the last ANALYZE, or never analyzed (no `pg_stats` row).
+- Tables the role cannot `SELECT` (e.g. a `pg_monitor` role) are reported "not estimated (insufficient privilege)"; `pg_stats` hides their statistics and they looked almost entirely bloated. JSON: new `warning` field on tables.
 - The test suite dropped the database named by `PGDATABASE`; it now always uses `qwash_test`.
 
 ## [0.5.0] - 2026-06-17

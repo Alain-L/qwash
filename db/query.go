@@ -648,12 +648,13 @@ func (db *DB) GetBloatPages(tableName string) (int, error) {
 		new(int64),  // dead_tup
 		&minPages,
 		&actualPages,
-		new(int),   // fillfactor
-		new(int64), // relation_size (bytes)
-		new(int64), // TOAST_size (bytes)
-		new(int64), // bloat_size (bytes)
-		&bloatPct,  // bloat_pct (nullable)
-		new(bool),  // stale_stats
+		new(int),     // fillfactor
+		new(int64),   // relation_size (bytes)
+		new(int64),   // TOAST_size (bytes)
+		new(int64),   // bloat_size (bytes)
+		&bloatPct,    // bloat_pct (nullable)
+		new(bool),    // stale_stats
+		new(*string), // warning (nullable)
 	)
 
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -699,6 +700,7 @@ func (db *DB) GetAllBloatPages() (map[string]int, error) {
 			new(int64),    // bloat_size (bytes)
 			new(*float64), // bloat_pct (nullable)
 			new(bool),     // stale_stats
+			new(*string),  // warning (nullable)
 		); err != nil {
 			return nil, fmt.Errorf("error scanning bloat row: %w", err)
 		}

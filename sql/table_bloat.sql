@@ -197,6 +197,10 @@ SELECT
    OR COALESCE(n_mod_since_analyze, 0) >
         current_setting('autovacuum_analyze_threshold')::float8
         + current_setting('autovacuum_analyze_scale_factor')::float8 * GREATEST(reltuples, 0)
-  ) AS stale_stats
+  ) AS stale_stats,
+  -- pg_stats only shows the columns the role may SELECT. Without SELECT on
+  -- the table (a monitoring role such as pg_monitor), the row width comes
+  -- out as 0 and every such table would look almost entirely bloated.
+  CASE WHEN NOT can_read_stats THEN 'insufficient privilege' END AS warning
 FROM bloat_estimation
 ORDER BY bloat_pct DESC;

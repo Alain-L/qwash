@@ -26,6 +26,7 @@ type EstimateJSON struct {
 		DeadTuples int64   `json:"dead_tuples"`
 		FillFactor int     `json:"fill_factor"`
 		StaleStats bool    `json:"stale_stats"`
+		Warning    string  `json:"warning"`
 	} `json:"tables"`
 	Indexes []struct {
 		Schema     string  `json:"schema"`
@@ -675,5 +676,46 @@ func TestEstimateStaleNeverAnalyzed(t *testing.T) {
 
 	if stale, output := estimateOne(t, "vaconly_est"); !stale {
 		t.Errorf("Never-analyzed table must be flagged stale\nOutput: %s", output)
+	}
+}
+
+// TestEstimateWithoutSelectPrivilege verifies that a table the role cannot
+// SELECT is reported as not estimated for lack of privilege (regression test:
+// pg_stats hides its statistics, the row width came out as 0 and the table
+// looked ~80% bloated; with a monitoring role, every table did).
+func TestEstimateWithoutSelectPrivilege(t *testing.T) {
+	admin := setupTestDB(t)
+	createBloatedTable(t, admin, "nopriv_tbl", 5000, 10)
+	if _, err := admin.Exec(ctx, `
+		DROP ROLE IF EXISTS qwash_nopriv;
+		CREATE ROLE qwash_nopriv LOGIN PASSWORD 'lim';
+		GRANT USAGE ON SCHEMA public TO qwash_nopriv;
+	`); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	defer func() {
+		admin.Exec(ctx, "REVOKE ALL ON SCHEMA public FROM qwash_nopriv")
+		admin.Exec(ctx, "DROP ROLE IF EXISTS qwash_nopriv")
+		admin.Close()
+	}()
+
+	output, err := runQwashCLIAs(t, "qwash_nopriv", "lim", "--estimate", "-t", "nopriv_tbl", "--json")
+	if err != nil {
+		t.Fatalf("CLI failed: %v\nOutput: %s", err, output)
+	}
+	var result EstimateJSON
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("Failed to parse JSON: %v\nOutput: %s", err, output)
+	}
+	if len(result.Tables) != 1 || result.Tables[0].Warning != "insufficient privilege" {
+		t.Fatalf("Expected warning \"insufficient privilege\"\nOutput: %s", output)
+	}
+
+	textOut, err := runQwashCLIAs(t, "qwash_nopriv", "lim", "--estimate")
+	if err != nil {
+		t.Fatalf("CLI (text) failed: %v\nOutput: %s", err, textOut)
+	}
+	if !strings.Contains(textOut, "NOT ESTIMATED") || !strings.Contains(textOut, "insufficient privilege") {
+		t.Errorf("Text report should list the table as not estimated for lack of privilege\nOutput: %s", textOut)
 	}
 }
