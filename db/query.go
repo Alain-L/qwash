@@ -381,7 +381,14 @@ var ErrNoFreeSpace = errors.New("no free space left below the pages being compac
 // AnalyzeTable refreshes the planner statistics of an already-resolved table.
 // The bloat estimate is derived from them (reltuples, pg_stats), so running it
 // right before a debloat keeps a stale estimate from driving the compaction.
+// lock_timeout keeps it from waiting behind a conflicting lock (e.g. an
+// anti-wraparound VACUUM) and from queuing DDL behind it meanwhile.
 func (db *DB) AnalyzeTable(ctx context.Context, tableName string) error {
+	if err := db.setLockTimeout(ctx); err != nil {
+		return fmt.Errorf("failed to set lock timeout: %w", err)
+	}
+	defer db.execCleanup("RESET lock_timeout")
+
 	_, err := db.conn.Exec(ctx, fmt.Sprintf("ANALYZE %s", sanitizeTableName(tableName)))
 	return err
 }
