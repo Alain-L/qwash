@@ -151,8 +151,8 @@ Analysis:
   -t, --table strings     Target specific table(s)
   -n, --schema strings    Target specific schema(s)
   -X, --exclude-table     Exclude specific tables
-  -S, --system            Include system catalog tables (pg_catalog); required to
-                          debloat them, after an interactive confirmation
+  -S, --system            Include system tables (pg_catalog, information_schema);
+                          required to debloat them, after an interactive confirmation
 
 Debloat:
   -B, --debloat           Perform bloat reduction
@@ -164,7 +164,8 @@ Debloat:
       --dry-run           Preview changes without applying them
       --reindex           Rebuild indexes after debloat (REINDEX CONCURRENTLY)
       --no-analyze        Do not ANALYZE target tables before estimating their bloat
-      --limit string      Stop after reducing X bloat (e.g., 500MB, 1GB, 50%)
+      --limit string      Stop after reducing X bloat (e.g., 500MB, 1GB, 50%),
+                          checked between tables
 
 Output:
   -v, --verbose           Enable verbose output

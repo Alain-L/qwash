@@ -137,7 +137,7 @@ func init() {
 	rootCmd.PersistentFlags().StringSliceVarP(&excludeTbl, "exclude-table", "X", nil,
 		"Exclude specific tables from analysis")
 	rootCmd.PersistentFlags().BoolVarP(&systemFlag, "system", "S", false,
-		"Include system tables (pg_catalog, information_schema)")
+		"Include system tables (pg_catalog, information_schema); required to debloat them, after a confirmation")
 
 	// Analysis options
 	rootCmd.PersistentFlags().BoolVarP(&estimateFlag, "estimate", "E", false,
@@ -169,7 +169,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&reindexFlag, "reindex", false,
 		"Rebuild indexes after debloat (REINDEX CONCURRENTLY)")
 	rootCmd.PersistentFlags().StringVar(&limitStr, "limit", "",
-		"Stop after reducing X bloat (e.g., 500MB, 1GB, 50%)")
+		"Stop after reducing X bloat (e.g., 500MB, 1GB, 50%), checked between tables")
 	rootCmd.PersistentFlags().IntVarP(&jobsFlag, "jobs", "j", 0,
 		"Number of parallel workers (default: 2, 4 with --fast, 1 with --slow)")
 
