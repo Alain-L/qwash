@@ -103,6 +103,9 @@ func (db *DB) checkLongTransactions() (string, error) {
 		}
 		warnings = append(warnings, fmt.Sprintf("%s/%s (%.0fmin, %s)", userName, appName, ageMinutes, state))
 	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("failed to check transactions: %w", err)
+	}
 
 	if len(warnings) > 0 {
 		return fmt.Sprintf("long-running transactions may block VACUUM: %s", strings.Join(warnings, ", ")), nil
@@ -117,10 +120,22 @@ func (db *DB) setLockTimeout(ctx context.Context) error {
 	return err
 }
 
-// resetLockTimeout restores the lock timeout to its default. RESET (rather
-// than SET ... = 0) preserves any value configured server-side.
-func (db *DB) resetLockTimeout(ctx context.Context) {
-	db.conn.Exec(ctx, "RESET lock_timeout")
+// cleanupTimeout bounds each cleanup statement run by execCleanup.
+const cleanupTimeout = 30 * time.Second
+
+// cleanupContext returns the context for cleanup statements. They must not
+// use the operation's context: after a Ctrl-C it is already canceled and the
+// statement would never be sent. The timeout keeps an unresponsive server
+// from hanging the exit.
+func cleanupContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), cleanupTimeout)
+}
+
+// execCleanup runs a best-effort cleanup statement on a cleanupContext.
+func (db *DB) execCleanup(query string) {
+	ctx, cancel := cleanupContext()
+	defer cancel()
+	db.conn.Exec(ctx, query)
 }
 
 // Exec executes a query without returning rows.
@@ -205,6 +220,9 @@ func (db *DB) ListDatabases() ([]string, error) {
 			return nil, fmt.Errorf("error scanning database name: %w", err)
 		}
 		databases = append(databases, dbname)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error reading database names: %w", err)
 	}
 	return databases, nil
 }
@@ -355,6 +373,26 @@ func (db *DB) estimateTargetPages(tableName string) (int, error) {
 	return toPage, nil
 }
 
+// ErrNoFreeSpace reports that a compaction stopped early because rows kept
+// moving to pages above the one being compacted, even right after a VACUUM:
+// there is no free space left below it to receive them.
+var ErrNoFreeSpace = errors.New("no free space left below the pages being compacted")
+
+// AnalyzeTable refreshes the planner statistics of an already-resolved table.
+// The bloat estimate is derived from them (reltuples, pg_stats), so running it
+// right before a debloat keeps a stale estimate from driving the compaction.
+// lock_timeout keeps it from waiting behind a conflicting lock (e.g. an
+// anti-wraparound VACUUM) and from queuing DDL behind it meanwhile.
+func (db *DB) AnalyzeTable(ctx context.Context, tableName string) error {
+	if err := db.setLockTimeout(ctx); err != nil {
+		return fmt.Errorf("failed to set lock timeout: %w", err)
+	}
+	defer db.execCleanup("RESET lock_timeout")
+
+	_, err := db.conn.Exec(ctx, fmt.Sprintf("ANALYZE %s", sanitizeTableName(tableName)))
+	return err
+}
+
 // compactToTarget runs the UPDATE-based compaction on an already-resolved
 // table down to the given target page count. The context cancels the loop
 // between page rounds and aborts the in-flight statement.
@@ -379,7 +417,8 @@ func (db *DB) compactToTarget(ctx context.Context, tableName string, toPage int)
 	if err := db.setLockTimeout(ctx); err != nil {
 		return fmt.Errorf("failed to set lock timeout: %w", err)
 	}
-	defer db.resetLockTimeout(ctx)
+	// RESET (rather than SET ... = 0) preserves any value configured server-side.
+	defer db.execCleanup("RESET lock_timeout")
 
 	// Acquire advisory lock to prevent concurrent compaction
 	locked, err := db.acquireTableLock(tableName)
@@ -408,7 +447,7 @@ func (db *DB) compactToTarget(ctx context.Context, tableName string, toPage int)
 	if err != nil {
 		return fmt.Errorf("failed to set session_replication_role: %w", err)
 	}
-	defer db.conn.Exec(ctx, "SET session_replication_role = DEFAULT")
+	defer db.execCleanup("SET session_replication_role = DEFAULT")
 
 	// Get the current page count (a cheap pg_class lookup) to know where the
 	// page loop starts; the target page count was supplied by the caller.
@@ -437,7 +476,7 @@ func (db *DB) compactToTarget(ctx context.Context, tableName string, toPage int)
 	if err != nil {
 		return fmt.Errorf("failed to create procedure: %w", err)
 	}
-	defer db.conn.Exec(ctx, fmt.Sprintf("DROP FUNCTION IF EXISTS %s(text,text,integer,integer,integer)", procName))
+	defer db.execCleanup(fmt.Sprintf("DROP FUNCTION IF EXISTS %s(text,text,integer,integer,integer)", procName))
 
 	// Initial VACUUM to establish baseline
 	_, err = db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s", sanitizeTableName(tableName)))
@@ -461,6 +500,8 @@ func (db *DB) compactToTarget(ctx context.Context, tableName string, toPage int)
 	pagesProcessed := 0
 	pagesSinceVacuum := 0
 	currentPage := initialPages - 1 // Start from last page (0-indexed)
+	vacuumedAfterMoveUp := false    // a VACUUM already followed rows moving up
+	stoppedAt := -1                 // page where the loop gave up (no free space)
 
 	for currentPage > toPage {
 		// Stop promptly on cancellation (Ctrl-C): the page just processed is
@@ -480,9 +521,25 @@ func (db *DB) compactToTarget(ctx context.Context, tableName string, toPage int)
 			return fmt.Errorf("procedure call failed at page %d: %w", currentPage, err)
 		}
 
-		if resultPage == -1 && db.Verbose {
-			fmt.Printf("\n  Warning: tuples moved to higher page at page %d\n", currentPage)
-		} else if resultPage == -2 && db.Verbose {
+		// -1: rows landed above the page instead of below it. The free space
+		// map is only refreshed by VACUUM, so vacuum once and retry the page.
+		// If rows still move up, the space really is not there (the estimate
+		// was wrong, or an old snapshot keeps dead rows alive): going on would
+		// only rewrite rows and grow the table.
+		if resultPage == -1 {
+			if vacuumedAfterMoveUp {
+				stoppedAt = currentPage
+				break
+			}
+			if _, err = db.conn.Exec(ctx, fmt.Sprintf("VACUUM %s", sanitizeTableName(tableName))); err != nil {
+				return fmt.Errorf("VACUUM failed at page %d: %w", currentPage, err)
+			}
+			pagesSinceVacuum = 0
+			vacuumedAfterMoveUp = true
+			continue
+		}
+		vacuumedAfterMoveUp = false
+		if resultPage == -2 && db.Verbose {
 			fmt.Printf("\n  Warning: max loops reached at page %d\n", currentPage)
 		}
 
@@ -542,6 +599,9 @@ func (db *DB) compactToTarget(ctx context.Context, tableName string, toPage int)
 			initialPages, finalPages, pagesProcessed)
 	}
 
+	if stoppedAt >= 0 {
+		return fmt.Errorf("%w (page %d)", ErrNoFreeSpace, stoppedAt)
+	}
 	return nil
 }
 
@@ -595,12 +655,13 @@ func (db *DB) GetBloatPages(tableName string) (int, error) {
 		new(int64),  // dead_tup
 		&minPages,
 		&actualPages,
-		new(int),   // fillfactor
-		new(int64), // relation_size (bytes)
-		new(int64), // TOAST_size (bytes)
-		new(int64), // bloat_size (bytes)
-		&bloatPct,  // bloat_pct (nullable)
-		new(bool),  // stale_stats
+		new(int),     // fillfactor
+		new(int64),   // relation_size (bytes)
+		new(int64),   // TOAST_size (bytes)
+		new(int64),   // bloat_size (bytes)
+		&bloatPct,    // bloat_pct (nullable)
+		new(bool),    // stale_stats
+		new(*string), // warning (nullable)
 	)
 
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -646,6 +707,7 @@ func (db *DB) GetAllBloatPages() (map[string]int, error) {
 			new(int64),    // bloat_size (bytes)
 			new(*float64), // bloat_pct (nullable)
 			new(bool),     // stale_stats
+			new(*string),  // warning (nullable)
 		); err != nil {
 			return nil, fmt.Errorf("error scanning bloat row: %w", err)
 		}
@@ -746,6 +808,21 @@ func (db *DB) DebloatPreflight(tableName string) (warnings []string, err error) 
 	return warnings, nil
 }
 
+// systemSchemas are the schemas holding PostgreSQL's own catalogs. Their
+// tables are only ever targeted when --system is given.
+var systemSchemas = []string{"pg_catalog", "pg_toast", "information_schema"}
+
+// IsSystemTable reports whether a schema-qualified "schema.table" name lives
+// in one of the systemSchemas.
+func IsSystemTable(qualified string) bool {
+	for _, s := range systemSchemas {
+		if strings.HasPrefix(qualified, s+".") {
+			return true
+		}
+	}
+	return false
+}
+
 // ListTablesFiltered returns tables filtered by schemas, system flag, and exclusion list.
 // Returned names are schema-qualified ("schema.table"). Exclusions match
 // either the bare table name or its qualified form. All user-provided values
@@ -763,7 +840,8 @@ func (db *DB) ListTablesFiltered(schemas []string, includeSystem bool, excludeTa
 		conditions = append(conditions, fmt.Sprintf("n.nspname = ANY($%d)", len(args)))
 	} else if !includeSystem {
 		// Exclude system schemas by default
-		conditions = append(conditions, "n.nspname NOT IN ('pg_catalog', 'pg_toast', 'information_schema')")
+		args = append(args, systemSchemas)
+		conditions = append(conditions, fmt.Sprintf("NOT (n.nspname = ANY($%d))", len(args)))
 	}
 
 	// Exclude specific tables (bare or schema-qualified names)
@@ -798,6 +876,9 @@ func (db *DB) ListTablesFiltered(schemas []string, includeSystem bool, excludeTa
 			return nil, fmt.Errorf("error scanning table name: %w", err)
 		}
 		tables = append(tables, tableName)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error reading table names: %w", err)
 	}
 	return tables, nil
 }
@@ -884,7 +965,9 @@ func (db *DB) ReindexTable(ctx context.Context, tableName string) error {
 	if err != nil {
 		// No blocking fallback. Clean up any invalid leftovers from the failed
 		// concurrent rebuild so they don't pile up across runs.
-		if cleaned := db.dropInvalidReindexLeftovers(ctx, tableName); cleaned != "" {
+		cleanupCtx, cancel := cleanupContext()
+		defer cancel()
+		if cleaned := db.dropInvalidReindexLeftovers(cleanupCtx, tableName); cleaned != "" {
 			return fmt.Errorf("REINDEX CONCURRENTLY failed (%w); cleaned up leftover invalid index(es): %s", err, cleaned)
 		}
 		return fmt.Errorf("REINDEX CONCURRENTLY failed: %w", err)

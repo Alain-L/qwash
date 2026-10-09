@@ -17,10 +17,13 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Release binaries embed the Go standard library, so build them with the
+      # latest stable toolchain (security fixes) rather than the go.mod minimum.
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: stable
+          check-latest: true
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6

@@ -48,6 +48,14 @@ type BloatTable struct {
 	// StaleStats is true when statistics are missing/stale (never analyzed),
 	// so the bloat estimate is unusable and the table needs ANALYZE.
 	StaleStats bool `json:"stale_stats,omitempty"`
+	// Warning explains why the bloat could not be estimated for a reason
+	// other than stale statistics ("insufficient privilege").
+	Warning string `json:"warning,omitempty"`
+}
+
+// NotEstimated reports whether the table's bloat figures are unusable.
+func (t BloatTable) NotEstimated() bool {
+	return t.StaleStats || t.Warning != ""
 }
 
 // ToastBloat represents bloat information for a TOAST table.

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -52,15 +53,16 @@ var (
 	btreeFlag bool // --btree
 
 	// Debloat options
-	debloatFlag bool   // --debloat (-B)
-	allFlag     bool   // --all (debloat every table when no -t is given)
-	fastFlag    bool   // --fast
-	slowFlag    bool   // --slow (1 page at a time with delay)
-	delayMs     int    // --delay (milliseconds between operations in slow mode)
-	dryRunFlag  bool   // --dry-run
-	reindexFlag bool   // --reindex
-	limitStr    string // --limit (stop after reducing X bloat: 500MB, 1GB, 50%)
-	jobsFlag    int    // --jobs (-j) number of parallel workers (0 = auto)
+	debloatFlag   bool   // --debloat (-B)
+	allFlag       bool   // --all (debloat every table when no -t is given)
+	fastFlag      bool   // --fast
+	slowFlag      bool   // --slow (1 page at a time with delay)
+	delayMs       int    // --delay (milliseconds between operations in slow mode)
+	dryRunFlag    bool   // --dry-run
+	reindexFlag   bool   // --reindex
+	noAnalyzeFlag bool   // --no-analyze
+	limitStr      string // --limit (stop after reducing X bloat: 500MB, 1GB, 50%)
+	jobsFlag      int    // --jobs (-j) number of parallel workers (0 = auto)
 
 	// Output options
 	verboseFlag bool // --verbose
@@ -81,6 +83,7 @@ It provides estimation, reporting, and optionally helps remove unnecessary bloat
 //	0 = success
 //	1 = fatal error (set via fatal(); e.g. bad flags, connection failure)
 //	2 = completed with per-table errors (some tables could not be processed)
+//	130 = debloat interrupted (Ctrl-C / SIGTERM) before completion
 //
 // It is applied in Execute() after the command returns, so that deferred
 // cleanup (connection close) still runs before the process exits.
@@ -134,7 +137,7 @@ func init() {
 	rootCmd.PersistentFlags().StringSliceVarP(&excludeTbl, "exclude-table", "X", nil,
 		"Exclude specific tables from analysis")
 	rootCmd.PersistentFlags().BoolVarP(&systemFlag, "system", "S", false,
-		"Include system tables (pg_catalog, information_schema)")
+		"Include system tables (pg_catalog, information_schema); required to debloat them, after a confirmation")
 
 	// Analysis options
 	rootCmd.PersistentFlags().BoolVarP(&estimateFlag, "estimate", "E", false,
@@ -161,10 +164,12 @@ func init() {
 		"Delay in milliseconds between page rounds in slow mode")
 	rootCmd.PersistentFlags().BoolVar(&dryRunFlag, "dry-run", false,
 		"Show what would be done without making changes")
+	rootCmd.PersistentFlags().BoolVar(&noAnalyzeFlag, "no-analyze", false,
+		"Do not ANALYZE target tables before estimating their bloat")
 	rootCmd.PersistentFlags().BoolVar(&reindexFlag, "reindex", false,
 		"Rebuild indexes after debloat (REINDEX CONCURRENTLY)")
 	rootCmd.PersistentFlags().StringVar(&limitStr, "limit", "",
-		"Stop after reducing X bloat (e.g., 500MB, 1GB, 50%)")
+		"Stop after reducing X bloat (e.g., 500MB, 1GB, 50%), checked between tables")
 	rootCmd.PersistentFlags().IntVarP(&jobsFlag, "jobs", "j", 0,
 		"Number of parallel workers (default: 2, 4 with --fast, 1 with --slow)")
 
@@ -556,16 +561,20 @@ func filterIndexByTable(indexes []analysis.BloatIndex, targetNames []string) []a
 // runDebloat executes the bloat reduction process
 func runDebloat(ctx context.Context, connection *db.DB) {
 	// Warning for system tables
-	if systemFlag {
-		fmt.Println("WARNING: You are about to debloat system tables!")
-		fmt.Println("This can be dangerous and may affect database stability.")
-		fmt.Print("Are you sure you want to continue? [y/N]: ")
+	// The prompt goes to stderr so it never mixes with --json output, and is
+	// skipped in dry-run, which changes nothing.
+	if systemFlag && !dryRunFlag {
+		if !term.IsTerminal(int(os.Stdin.Fd())) {
+			fatal("--system requires an interactive confirmation (stdin is not a terminal)")
+		}
+		fmt.Fprintln(os.Stderr, "WARNING: You are about to debloat system tables!")
+		fmt.Fprintln(os.Stderr, "This can be dangerous and may affect database stability.")
+		fmt.Fprint(os.Stderr, "Are you sure you want to continue? [y/N]: ")
 
 		var response string
 		fmt.Scanln(&response)
 		if response != "y" && response != "Y" {
-			fmt.Println("Aborted.")
-			return
+			fatal("aborted by user")
 		}
 	}
 
@@ -599,6 +608,21 @@ func runDebloat(ctx context.Context, connection *db.DB) {
 	if len(tables) == 0 {
 		fmt.Println("No tables to debloat.")
 		return
+	}
+
+	// Refresh the statistics the estimate is built on: stale ones make it
+	// wrong, and a wrong estimate sends the compaction after space that is
+	// not there. ANALYZE only samples the table and blocks no reads or writes.
+	if !noAnalyzeFlag {
+		for _, table := range tables {
+			err := connection.AnalyzeTable(ctx, table)
+			if ctx.Err() != nil {
+				break // interrupted: reported with the results below
+			}
+			if err != nil {
+				slog.Warn("ANALYZE failed, the bloat estimate may be stale", "table", table, "error", err)
+			}
+		}
 	}
 
 	// Estimate bloat for the whole database in a single catalog-wide scan,
@@ -714,6 +738,26 @@ func runDebloat(ctx context.Context, connection *db.DB) {
 			exitCode = 2
 			break
 		}
+	}
+
+	// An interrupted run is not a success, whatever the tables already done:
+	// exit 130 (128 + SIGINT, the shell convention) and name the tables that
+	// were never started, so a rerun can pick them up.
+	if ctx.Err() != nil {
+		started := make(map[string]bool, len(results))
+		for _, r := range results {
+			started[r.Table] = true
+		}
+		var notStarted []string
+		for _, t := range tables {
+			if !started[t] {
+				notStarted = append(notStarted, t)
+			}
+		}
+		if len(notStarted) > 0 {
+			slog.Warn("interrupted; these tables were not processed", "tables", strings.Join(notStarted, ", "))
+		}
+		exitCode = 130
 	}
 }
 
@@ -905,23 +949,33 @@ func getTargetTables(connection *db.DB) ([]string, error) {
 	// consumer — estimation, advisory lock, DML — designates the same
 	// relation. This also fails fast on tables that don't exist, instead
 	// of reporting a confusing per-table error later.
+	var tables []string
 	if len(targetTables) > 0 {
-		resolved := make([]string, 0, len(targetTables))
 		for _, t := range targetTables {
 			qualified, err := connection.ResolveTableName(t)
 			if err != nil {
 				return nil, err
 			}
-			resolved = append(resolved, qualified)
+			tables = append(tables, qualified)
 		}
-		return resolved, nil
+	} else {
+		// Otherwise, get all tables (filtered by schema if specified);
+		// ListTablesFiltered already returns schema-qualified names.
+		var err error
+		tables, err = connection.ListTablesFiltered(targetSchemas, systemFlag, excludeTbl)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	// Otherwise, get all tables (filtered by schema if specified);
-	// ListTablesFiltered already returns schema-qualified names.
-	tables, err := connection.ListTablesFiltered(targetSchemas, systemFlag, excludeTbl)
-	if err != nil {
-		return nil, err
+	// Rewriting catalog rows is only ever done with --system (and its
+	// confirmation), whether the table was named with -t or reached via -n.
+	if !systemFlag {
+		for _, t := range tables {
+			if db.IsSystemTable(t) {
+				return nil, fmt.Errorf("%s is a system table: use --system to debloat system tables", t)
+			}
+		}
 	}
 
 	return tables, nil
@@ -1005,6 +1059,14 @@ func processTable(ctx context.Context, connection *db.DB, table string, bloatPag
 		if compactErr != nil {
 			break
 		}
+	}
+
+	// Running out of free space is not a failure: the table is consistent
+	// and whatever could be reclaimed was. Further passes would not help.
+	if errors.Is(compactErr, db.ErrNoFreeSpace) {
+		slog.Warn("compaction stopped early: rows kept moving up, no free space left below "+
+			"(the bloat estimate may be off, or a long-running transaction may be holding dead rows)", "table", table, "reason", compactErr)
+		compactErr = nil
 	}
 
 	if compactErr != nil {

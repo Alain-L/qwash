@@ -3,7 +3,7 @@
 **qwash** is a single-binary PostgreSQL introspection & maintenance CLI — no extensions required. It detects and safely reduces table, index, and TOAST bloat **using regular DML operations** instead of a long exclusive lock (unlike `VACUUM FULL`), making it suitable for production use (see [Operational Caveats](#operational-caveats)).
 
 qwash is a **standalone tool** that combines bloat estimation and reduction in a single binary:
-- **No extensions required** — works with any PostgreSQL 9.6+ installation
+- **No extensions required** — estimation works on PostgreSQL 9.6+, debloat on PostgreSQL 12+
 - **No external dependencies** — no Perl, Python, or `pgstattuple` needed
 - **Estimate then debloat** — analyze bloat first, then reduce it based on results
 
@@ -63,7 +63,7 @@ go build -o bin/qwash
 
 ### Requirements
 
-- PostgreSQL 9.6+
+- PostgreSQL 9.6+ for estimation; PostgreSQL 12+ for `--debloat` and `--reindex` (continuous integration covers 14 to 18)
 - For `--debloat`: a superuser role (PostgreSQL < 15) or a role granted `SET` on `session_replication_role` (PostgreSQL 15+), which must also **own the target tables** so that `VACUUM` can reclaim the freed pages
 - For `--debloat`: a direct connection (no transaction-pooling pgbouncer; qwash relies on session state)
 
@@ -120,8 +120,9 @@ parameters not given on the command line are resolved like psql would, from
 # Dry-run (preview without changes)
 ./bin/qwash --debloat -d mydb -t mytable --dry-run
 
-# Stop after reducing 500MB of bloat
-./bin/qwash --debloat -d mydb -t mytable --limit 500MB
+# Stop after reducing 500MB of bloat (checked between tables: the table in
+# progress is always finished, so the limit can be exceeded)
+./bin/qwash --debloat -d mydb --all --limit 500MB
 
 # Rebuild indexes after debloat
 ./bin/qwash --debloat -d mydb -t mytable --reindex
@@ -150,7 +151,8 @@ Analysis:
   -t, --table strings     Target specific table(s)
   -n, --schema strings    Target specific schema(s)
   -X, --exclude-table     Exclude specific tables
-  -S, --system            Include system catalog tables (pg_catalog) in the estimate
+  -S, --system            Include system tables (pg_catalog, information_schema);
+                          required to debloat them, after an interactive confirmation
 
 Debloat:
   -B, --debloat           Perform bloat reduction
@@ -161,7 +163,9 @@ Debloat:
   -j, --jobs int          Parallel workers (default: 2, 4 with --fast, 1 with --slow)
       --dry-run           Preview changes without applying them
       --reindex           Rebuild indexes after debloat (REINDEX CONCURRENTLY)
-      --limit string      Stop after reducing X bloat (e.g., 500MB, 1GB, 50%)
+      --no-analyze        Do not ANALYZE target tables before estimating their bloat
+      --limit string      Stop after reducing X bloat (e.g., 500MB, 1GB, 50%),
+                          checked between tables
 
 Output:
   -v, --verbose           Enable verbose output
@@ -201,14 +205,25 @@ The difference is the estimated bloat.
 
 **B-Tree index bloat** (`--btree`) follows the same ioguix methodology adapted for indexes: it derives the theoretical minimum number of pages from `pg_stats` (`avg_width`, `null_frac`) and B-Tree page overhead (page header, opaque, item pointers, tuple header, MAXALIGN padding) and compares it to the actual `relpages` count. Indexes whose key columns include a `name`-typed column are flagged as **unreliable** (`is_na = true`) because `pg_stats` returns inaccurate widths for that type. A [standalone query](sql/btree_bloat.sql) is also available for DBA use.
 
+**These are estimates, not measurements.** They are only as good as the statistics they read, which is why tables with stale, missing or unreadable statistics are listed as *not estimated* instead of given a figure. Known biases:
+
+- **Heap**: column alignment padding and the NULL bitmap are approximated, which can shift the figure by a few points on wide tables.
+- **TOAST**: the theoretical minimum assumes chunks pack pages perfectly, so the estimate can report bloat that no rewrite would reclaim.
+- **B-Tree**: deduplication (PostgreSQL 13+) is not modeled, so indexes with many duplicate keys can have their bloat *under*-estimated.
+
+For an exact figure on a given relation, use `pgstattuple` / `pgstatindex`.
+
 ### Bloat Reduction Algorithm
 
 The debloat algorithm is inspired by [pgcompacttable](https://github.com/dataegret/pgcompacttable) but uses an **UPDATE-based compaction** approach via a temporary stored procedure:
 
-1. Create a procedure that updates rows from the last N pages (`UPDATE SET col = col`)
-2. PostgreSQL rewrites these tuples, placing them in earlier free space (HOT updates are bypassed)
-3. Run `VACUUM` to release the now-empty pages at the end
-4. Repeat until bloat is minimized
+1. Run `ANALYZE` on the target tables, so the bloat estimate that sets the compaction target rests on fresh statistics (disable with `--no-analyze`; this also applies to `--dry-run`)
+2. Create a procedure that updates rows from the last N pages (`UPDATE SET col = col`)
+3. PostgreSQL rewrites these tuples, placing them in earlier free space (HOT updates are bypassed)
+4. Run `VACUUM` to release the now-empty pages at the end
+5. Repeat until bloat is minimized
+
+If rows keep landing *above* the page being compacted even right after a `VACUUM`, there is no free space left below it: qwash stops on that table with a warning instead of rewriting it for nothing. The usual causes are a long-running transaction holding dead rows, or an estimate that was off.
 
 This approach:
 - **Lets writes keep flowing** — compaction uses regular `UPDATE`s (row-level locking only); the only exclusive lock is the brief one `VACUUM` takes to truncate empty pages at the end of the file
@@ -232,9 +247,9 @@ warrant attention:
 - **WAL and logical replication** — every moved row is written to WAL (volume ≈ data moved) and **decoded by logical replication**: expect subscriber traffic and lag proportional to the bloat being removed (qwash warns when the table is published).
 - **Connection pooling** — connect **directly** to PostgreSQL. Through a transaction-pooling pgbouncer, the session-level protections (`session_replication_role`, `lock_timeout`, advisory locks) may land on different backends and silently stop working.
 - **Statistics matter** — the bloat estimation is based on `pg_stats`/`pg_class`; run `ANALYZE` (and ideally `VACUUM`) on the target tables first if their statistics are stale.
-- **Interruptions** — `Ctrl-C` stops cleanly between pages: the page in progress rolls back, already-compacted pages stay. `--reindex` uses `REINDEX CONCURRENTLY` only (PostgreSQL 12+) and never falls back to a blocking `REINDEX`.
+- **Interruptions** — `Ctrl-C` asks the server to cancel the statement in progress (the page being compacted rolls back; already-compacted pages stay), restores the session settings, then exits with code `130` and lists the tables it did not get to. `--reindex` uses `REINDEX CONCURRENTLY` only (PostgreSQL 12+) and never falls back to a blocking `REINDEX`.
 
-**Exit codes** (for automation): `0` success · `1` fatal error (bad flags, connection failure, unknown `-t` table) · `2` completed with per-table failures.
+**Exit codes** (for automation): `0` success · `1` fatal error (bad flags, connection failure, unknown `-t` table) · `2` completed with per-table failures · `130` debloat interrupted (`Ctrl-C`/`SIGTERM`).
 
 ### Debloat Modes
 

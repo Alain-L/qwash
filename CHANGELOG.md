@@ -2,7 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.5.1] - 2026-10-09
+
+### Changed
+- `--debloat` runs `ANALYZE` on the target tables before estimating their bloat (`--no-analyze` to opt out); this also applies to `--dry-run`.
+- `Ctrl-C` cancels the running statement on the server (was: only closed the connection) and exits `130`, naming the tables not processed.
+- `--system` confirmation goes to stderr, is skipped in `--dry-run`, and fails when stdin is not a terminal; declining it exits `1` (was `0`).
+- Built with a supported Go release; pgx 5.11; `govulncheck` in CI.
+
+### Fixed
+- System tables could be debloated without `--system` via `-t pg_catalog.x` or `-n pg_catalog`.
+- A table with stale statistics was rewritten for nothing (bigger afterwards, heavy WAL); compaction now stops on a table when rows keep moving to higher pages.
+- Errors raised mid-result were ignored, giving truncated heap reports with exit code `0` (with `--toast`/`--btree` the section is now dropped with a warning); a role without `USAGE` on any schema could not estimate at all.
+- Tables whose statistics no longer describe them are flagged "not estimated" instead of reported heavily bloated: changed more than autovacuum's ANALYZE threshold since the last ANALYZE, or never analyzed (no `pg_stats` row).
+- Tables the role cannot `SELECT` (e.g. a `pg_monitor` role) are reported "not estimated (insufficient privilege)"; `pg_stats` hides their statistics and they looked almost entirely bloated. JSON: new `warning` field on tables.
+- The `ANALYZE` added before `--debloat` is bounded by `lock_timeout`, like the compaction.
+- The test suite dropped the database named by `PGDATABASE`; it now always uses `qwash_test`.
 
 ## [0.5.0] - 2026-06-17
 

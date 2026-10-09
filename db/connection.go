@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgconn/ctxwatch"
 )
 
 // Config holds the PostgreSQL connection parameters that were explicitly
@@ -95,6 +97,15 @@ func Connect(cfg Config, verbose bool) (*DB, error) {
 	connConfig, err := pgx.ParseConfig(cfg.DSN())
 	if err != nil {
 		return nil, fmt.Errorf("invalid connection parameters: %w", err)
+	}
+
+	// On cancellation (Ctrl-C), ask the server to cancel the running
+	// statement instead of pgx's default of just closing the socket, which
+	// leaves the backend running it (VACUUM, REINDEX...) to completion with
+	// its locks held. The connection then stays usable for cleanup; it is
+	// only closed if the server has not answered after DeadlineDelay.
+	connConfig.BuildContextWatcherHandler = func(pgConn *pgconn.PgConn) ctxwatch.Handler {
+		return &pgconn.CancelRequestContextWatcherHandler{Conn: pgConn, DeadlineDelay: 5 * time.Second}
 	}
 
 	conn, err := pgx.ConnectConfig(ctx, connConfig)

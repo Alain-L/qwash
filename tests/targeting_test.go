@@ -2,6 +2,8 @@ package tests
 
 import (
 	"context"
+	"errors"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -155,5 +157,60 @@ func TestCLIEstimateExcludeTable(t *testing.T) {
 	}
 	if strings.Contains(output, "filter_dropped") {
 		t.Errorf("filter_dropped must not appear when excluded\nOutput: %s", output)
+	}
+}
+
+// exitCode returns the process exit status carried by a runQwashCLI error
+// (0 when the command succeeded, -1 when it could not be run at all).
+func exitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return -1
+}
+
+// TestCLIDebloatSystemTableRequiresSystemFlag verifies that catalog tables are
+// never debloated without --system, however they are designated (regression
+// test: -t pg_catalog.x and -n pg_catalog bypassed the --system confirmation
+// and ran UPDATEs on pg_class).
+func TestCLIDebloatSystemTableRequiresSystemFlag(t *testing.T) {
+	setupTestDB(t).Close()
+
+	for _, args := range [][]string{
+		{"--debloat", "-t", "pg_catalog.pg_class"},
+		{"--debloat", "--all", "-n", "pg_catalog"},
+	} {
+		output, err := runQwashCLI(t, args...)
+		if code := exitCode(err); code != 1 {
+			t.Errorf("%v: expected exit code 1, got %d\nOutput: %s", args, code, output)
+		}
+		if !strings.Contains(output, "use --system") {
+			t.Errorf("%v: error should point to --system\nOutput: %s", args, output)
+		}
+	}
+}
+
+// TestCLIDebloatSystemConfirmation verifies that --system asks for an
+// interactive confirmation before any change, refuses to run when stdin is
+// not a terminal (instead of printing "Aborted." and exiting 0), and does not
+// ask in dry-run, which changes nothing.
+func TestCLIDebloatSystemConfirmation(t *testing.T) {
+	setupTestDB(t).Close()
+
+	output, err := runQwashCLI(t, "--debloat", "--system", "-t", "pg_catalog.pg_class")
+	if code := exitCode(err); code != 1 {
+		t.Errorf("Expected exit code 1 without a terminal, got %d\nOutput: %s", code, output)
+	}
+	if !strings.Contains(output, "interactive confirmation") {
+		t.Errorf("Error should explain that a confirmation is required\nOutput: %s", output)
+	}
+
+	output, err = runQwashCLI(t, "--debloat", "--system", "-t", "pg_catalog.pg_class", "--dry-run")
+	if code := exitCode(err); code != 0 {
+		t.Errorf("Dry-run with --system should not prompt, got exit code %d\nOutput: %s", code, output)
 	}
 }

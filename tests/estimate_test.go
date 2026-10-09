@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Alain-L/qwash/db"
 )
 
 var ctx = context.Background()
@@ -24,6 +26,7 @@ type EstimateJSON struct {
 		DeadTuples int64   `json:"dead_tuples"`
 		FillFactor int     `json:"fill_factor"`
 		StaleStats bool    `json:"stale_stats"`
+		Warning    string  `json:"warning"`
 	} `json:"tables"`
 	Indexes []struct {
 		Schema     string  `json:"schema"`
@@ -534,5 +537,185 @@ func TestEstimateDefaultBehavior(t *testing.T) {
 	// Should show bloat information (estimate mode)
 	if !strings.Contains(output, "default_test") && !strings.Contains(output, "bloat") {
 		t.Logf("Default mode should show estimate results. Output: %s", output)
+	}
+}
+
+// TestEstimateSchemaWithoutUsage verifies that a role lacking USAGE on one
+// schema still gets a complete report for the tables it can reach. The heap
+// query used to cast 'schema.table' strings to regclass, which fails without
+// USAGE; the error surfaced mid-stream and the report came out truncated with
+// exit code 0.
+func TestEstimateSchemaWithoutUsage(t *testing.T) {
+	admin := setupTestDB(t)
+	createBloatedTable(t, admin, "usage_visible", 1000, 50)
+	if _, err := admin.Exec(ctx, `
+		CREATE SCHEMA usage_hidden;
+		CREATE TABLE usage_hidden.secret (id int);
+		INSERT INTO usage_hidden.secret SELECT generate_series(1, 1000);
+		ANALYZE usage_hidden.secret;
+		DROP ROLE IF EXISTS qwash_usage_lim;
+		CREATE ROLE qwash_usage_lim LOGIN PASSWORD 'lim';
+		GRANT USAGE ON SCHEMA public TO qwash_usage_lim;
+		GRANT SELECT ON usage_visible TO qwash_usage_lim;
+	`); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	defer func() {
+		admin.Exec(ctx, "DROP SCHEMA usage_hidden CASCADE")
+		admin.Exec(ctx, "REVOKE ALL ON usage_visible FROM qwash_usage_lim")
+		admin.Exec(ctx, "REVOKE ALL ON SCHEMA public FROM qwash_usage_lim")
+		admin.Exec(ctx, "DROP ROLE IF EXISTS qwash_usage_lim")
+		admin.Close()
+	}()
+
+	output, err := runQwashCLIAs(t, "qwash_usage_lim", "lim", "--estimate", "--json")
+	if err != nil {
+		t.Fatalf("Estimate should succeed without USAGE on an unrelated schema: %v\nOutput: %s", err, output)
+	}
+	var result EstimateJSON
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("Failed to parse JSON: %v\nOutput: %s", err, output)
+	}
+	found := false
+	for _, tbl := range result.Tables {
+		if tbl.Schema == "public" && tbl.TableName == "usage_visible" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("public.usage_visible missing from the report\nOutput: %s", output)
+	}
+}
+
+// estimateOne runs --estimate --json on a single table and returns its entry.
+func estimateOne(t *testing.T, table string) (stale bool, output string) {
+	output, err := runQwashCLI(t, "--estimate", "-t", table, "--json")
+	if err != nil {
+		t.Fatalf("CLI failed: %v\nOutput: %s", err, output)
+	}
+	var result EstimateJSON
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("Failed to parse JSON: %v\nOutput: %s", err, output)
+	}
+	if len(result.Tables) != 1 {
+		t.Fatalf("Expected 1 table in output, got %d\nOutput: %s", len(result.Tables), output)
+	}
+	return result.Tables[0].StaleStats, output
+}
+
+// TestEstimateStaleAfterGrowth verifies that a table changed a lot since its
+// last ANALYZE is flagged stale (regression test: analyzed with short rows,
+// then filled with long ones and vacuumed, it was reported ~87% bloated while
+// it had no bloat at all).
+func TestEstimateStaleAfterGrowth(t *testing.T) {
+	conn := setupTestDB(t)
+	for _, q := range []string{
+		"CREATE TABLE grown_est (id serial PRIMARY KEY, v text) WITH (autovacuum_enabled = false)",
+		"INSERT INTO grown_est (v) SELECT 'x' FROM generate_series(1, 1000)",
+		"ANALYZE grown_est",
+		"INSERT INTO grown_est (v) SELECT repeat('y', 300) FROM generate_series(1, 30000)",
+		"VACUUM grown_est",
+	} {
+		if _, err := conn.Exec(ctx, q); err != nil {
+			t.Fatalf("setup failed on %q: %v", q, err)
+		}
+	}
+	conn.Close()
+
+	// Table counters reach the statistics system asynchronously; poll.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		stale, output := estimateOne(t, "grown_est")
+		if stale {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Table changed since its last ANALYZE must be flagged stale\nOutput: %s", output)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// TestEstimateStaleNeverAnalyzed verifies that a vacuumed but never analyzed
+// table is flagged stale even once the activity counters are gone (after
+// pg_stat_reset() or a crash), from the absence of any pg_stats row
+// (regression test: it was reported ~80% bloated).
+func TestEstimateStaleNeverAnalyzed(t *testing.T) {
+	conn := setupTestDB(t)
+	for _, q := range []string{
+		"CREATE TABLE vaconly_est (id int, v text) WITH (autovacuum_enabled = false)",
+		"INSERT INTO vaconly_est SELECT g, repeat('z', 100) FROM generate_series(1, 20000) g",
+		"VACUUM vaconly_est",
+	} {
+		if _, err := conn.Exec(ctx, q); err != nil {
+			t.Fatalf("setup failed on %q: %v", q, err)
+		}
+	}
+	conn.Close() // flushes this session's pending counters
+
+	// Reset the counters until the INSERTs no longer show in
+	// n_mod_since_analyze, so only the missing pg_stats can flag the table.
+	admin, err := db.Connect(getTestConfig(), false)
+	if err != nil {
+		t.Fatalf("Failed to reconnect: %v", err)
+	}
+	defer admin.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var mods int64
+		admin.Exec(ctx, "SELECT pg_stat_reset()")
+		if err := admin.QueryRow(ctx, `SELECT coalesce(n_mod_since_analyze, 0)
+			FROM pg_stat_user_tables WHERE relname = 'vaconly_est'`).Scan(&mods); err == nil && mods == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("n_mod_since_analyze never went back to 0 after pg_stat_reset()")
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	if stale, output := estimateOne(t, "vaconly_est"); !stale {
+		t.Errorf("Never-analyzed table must be flagged stale\nOutput: %s", output)
+	}
+}
+
+// TestEstimateWithoutSelectPrivilege verifies that a table the role cannot
+// SELECT is reported as not estimated for lack of privilege (regression test:
+// pg_stats hides its statistics, the row width came out as 0 and the table
+// looked ~80% bloated; with a monitoring role, every table did).
+func TestEstimateWithoutSelectPrivilege(t *testing.T) {
+	admin := setupTestDB(t)
+	createBloatedTable(t, admin, "nopriv_tbl", 5000, 10)
+	if _, err := admin.Exec(ctx, `
+		DROP ROLE IF EXISTS qwash_nopriv;
+		CREATE ROLE qwash_nopriv LOGIN PASSWORD 'lim';
+		GRANT USAGE ON SCHEMA public TO qwash_nopriv;
+	`); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	defer func() {
+		admin.Exec(ctx, "REVOKE ALL ON SCHEMA public FROM qwash_nopriv")
+		admin.Exec(ctx, "DROP ROLE IF EXISTS qwash_nopriv")
+		admin.Close()
+	}()
+
+	output, err := runQwashCLIAs(t, "qwash_nopriv", "lim", "--estimate", "-t", "nopriv_tbl", "--json")
+	if err != nil {
+		t.Fatalf("CLI failed: %v\nOutput: %s", err, output)
+	}
+	var result EstimateJSON
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("Failed to parse JSON: %v\nOutput: %s", err, output)
+	}
+	if len(result.Tables) != 1 || result.Tables[0].Warning != "insufficient privilege" {
+		t.Fatalf("Expected warning \"insufficient privilege\"\nOutput: %s", output)
+	}
+
+	textOut, err := runQwashCLIAs(t, "qwash_nopriv", "lim", "--estimate")
+	if err != nil {
+		t.Fatalf("CLI (text) failed: %v\nOutput: %s", err, textOut)
+	}
+	if !strings.Contains(textOut, "NOT ESTIMATED") || !strings.Contains(textOut, "insufficient privilege") {
+		t.Errorf("Text report should list the table as not estimated for lack of privilege\nOutput: %s", textOut)
 	}
 }

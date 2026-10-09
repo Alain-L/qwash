@@ -15,14 +15,21 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Test database configuration from environment or defaults
+// testDatabase is the database the suite drops and recreates. It is fixed on
+// purpose and never taken from PGDATABASE: a developer's shell often exports
+// PGDATABASE pointing at a real database, which setupTestDB would destroy.
+const testDatabase = "qwash_test"
+
+// getTestConfig returns the test connection settings. Host, port, user,
+// password and sslmode come from the PG* environment variables (or defaults);
+// the database is always testDatabase.
 func getTestConfig() db.Config {
 	return db.Config{
 		Host:     getEnv("PGHOST", "localhost"),
 		Port:     getEnv("PGPORT", "5432"),
 		User:     getEnv("PGUSER", "postgres"),
 		Password: getEnv("PGPASSWORD", "postgres"),
-		Database: getEnv("PGDATABASE", "qwash_test"),
+		Database: testDatabase,
 		SSLMode:  getEnv("PGSSLMODE", "disable"),
 	}
 }
@@ -212,6 +219,24 @@ func runQwashCLI(t *testing.T, args ...string) (string, error) {
 		cmd.Env = append(os.Environ(), "PGPASSWORD="+cfg.Password)
 	}
 
+	output, err := cmd.CombinedOutput()
+	return string(output), err
+}
+
+// runQwashCLIAs runs the qwash binary like runQwashCLI, but connected as the
+// given role instead of the test superuser.
+func runQwashCLIAs(t *testing.T, user, password string, args ...string) (string, error) {
+	cfg := getTestConfig()
+	allArgs := append([]string{
+		"-h", cfg.Host,
+		"-p", cfg.Port,
+		"-U", user,
+		"-d", cfg.Database,
+		"--sslmode", cfg.SSLMode,
+	}, args...)
+	cmd := exec.Command("./bin/qwash", allArgs...)
+	cmd.Dir = ".." // Run from project root
+	cmd.Env = append(os.Environ(), "PGPASSWORD="+password)
 	output, err := cmd.CombinedOutput()
 	return string(output), err
 }

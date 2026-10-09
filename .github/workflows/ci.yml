@@ -23,7 +23,11 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          # Latest patch of the go.mod minor rather than the exact minimum:
+          # govulncheck reports the standard library vulnerabilities fixed in
+          # later patches. Not "stable": staticcheck can lag a new Go release.
+          go-version: '1.26'
+          check-latest: true
 
       - name: Cache Go build
         uses: actions/cache@v4
@@ -54,6 +58,9 @@ jobs:
         run: |
           go vet ./...
           staticcheck ./...
+
+      - name: Check for known vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
       - name: Build
         run: go build -v .
@@ -112,6 +119,5 @@ jobs:
           PGPORT: 5432
           PGUSER: postgres
           PGPASSWORD: postgres
-          PGDATABASE: qwash_test
           PGSSLMODE: disable
         run: go test -race -v ./tests/... -timeout 15m

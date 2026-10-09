@@ -32,6 +32,9 @@ table_stats AS (
     tbl.reltoastrelid,            -- OID of TOAST table (0 if none)
     psut.n_live_tup,              -- Live tuples from pg_stat_user_tables
     psut.n_dead_tup,              -- Dead tuples awaiting VACUUM
+    psut.n_mod_since_analyze,     -- Rows changed since the last ANALYZE
+    COUNT(s.attname) AS stats_columns,  -- Columns with visible pg_stats rows
+    has_table_privilege(tbl.oid, 'SELECT') AS can_read_stats,
     COALESCE(
       substring(array_to_string(tbl.reloptions, ' ') FROM 'fillfactor=([0-9]+)')::smallint,
       100
@@ -62,6 +65,7 @@ table_stats AS (
   GROUP BY
     ns.nspname, tbl.relname, tbl.oid, tbl.reltuples, tbl.relpages,
     tbl.reloptions, tbl.reltoastrelid, psut.n_live_tup, psut.n_dead_tup,
+    psut.n_mod_since_analyze,
     c.tuple_header_base, c.block_size, c.memory_alignment, c.page_header_size
 ),
 
@@ -77,6 +81,9 @@ tuple_size_calculation AS (
     reltoastrelid,
     n_live_tup,
     n_dead_tup,
+    n_mod_since_analyze,
+    stats_columns,
+    can_read_stats,
     fillfactor,
     block_size,
     page_header_size,
@@ -116,6 +123,9 @@ bloat_estimation AS (
     reltoastrelid,
     n_live_tup,
     n_dead_tup,
+    n_mod_since_analyze,
+    stats_columns,
+    can_read_stats,
     fillfactor,
     tuple_size,
     block_size,
@@ -142,8 +152,10 @@ SELECT
   estimated_min_pages AS min_pages_required,
   actual_pages,
   fillfactor,
-  pg_relation_size(format('%I.%I', schemaname, tblname)::regclass)::bigint
-    AS relation_size,
+  -- Size by OID, not by name: casting a 'schema.table' string to regclass
+  -- requires USAGE on the schema and would abort the whole query for a role
+  -- lacking it, even though that table's own row is all that is affected.
+  pg_relation_size(table_oid)::bigint AS relation_size,
   CASE WHEN reltoastrelid <> 0
        THEN pg_relation_size(reltoastrelid::regclass)
        ELSE 0
@@ -165,12 +177,30 @@ SELECT
   --     table) — a DELETE/UPDATE-heavy table whose reltuples no longer matches
   --     reality, so the bloat would be badly under- or over-estimated.
   -- n_dead_tup is the same signal autovacuum uses to decide a VACUUM is due.
+  -- Two more cases make pg_stats (the row width) wrong or absent:
+  --   * never analyzed: the table holds rows, the role may read its stats,
+  --     yet pg_stats has none. A catalog fact, unlike last_analyze, which
+  --     pg_stat_reset() and crash recovery wipe out. (A role without SELECT
+  --     sees no stats either; that case is not a staleness issue.)
+  --   * changed a lot since the last ANALYZE: more modified rows than the
+  --     threshold autovacuum itself uses to decide an ANALYZE is due
+  --     (autovacuum_analyze_threshold + autovacuum_analyze_scale_factor
+  --     * reltuples, server-wide settings; per-table overrides are ignored).
+  --     This threshold is PostgreSQL's heuristic, not a hard fact.
   (reltuples < 0
    OR (actual_pages = 0
-       AND pg_relation_size(format('%I.%I', schemaname, tblname)::regclass) > 0)
+       AND pg_relation_size(table_oid) > 0)
    OR (COALESCE(n_dead_tup, 0) > 0
        AND COALESCE(n_dead_tup, 0)::float8
            / NULLIF(COALESCE(n_live_tup, 0) + COALESCE(n_dead_tup, 0), 0) > 0.05)
-  ) AS stale_stats
+   OR (stats_columns = 0 AND can_read_stats AND reltuples > 0)
+   OR COALESCE(n_mod_since_analyze, 0) >
+        current_setting('autovacuum_analyze_threshold')::float8
+        + current_setting('autovacuum_analyze_scale_factor')::float8 * GREATEST(reltuples, 0)
+  ) AS stale_stats,
+  -- pg_stats only shows the columns the role may SELECT. Without SELECT on
+  -- the table (a monitoring role such as pg_monitor), the row width comes
+  -- out as 0 and every such table would look almost entirely bloated.
+  CASE WHEN NOT can_read_stats THEN 'insufficient privilege' END AS warning
 FROM bloat_estimation
 ORDER BY bloat_pct DESC;

@@ -9,12 +9,12 @@ import (
 // PrintBloatSummary displays a textual report of table and index bloat.
 // Tables are grouped by bloat severity level with summary statistics at the top.
 func PrintBloatSummary(tableBloat []analysis.BloatTable, indexBloat []analysis.BloatIndex) {
-	// Separate tables we could estimate from those with stale/missing
-	// statistics (never analyzed): the latter cannot be estimated and must be
-	// surfaced rather than counted as "no bloat".
+	// Separate tables we could estimate from those we could not (stale or
+	// unreadable statistics): the latter must be surfaced rather than counted
+	// as "no bloat" or as bloated.
 	var estimated, stale []analysis.BloatTable
 	for _, tbl := range tableBloat {
-		if tbl.StaleStats {
+		if tbl.NotEstimated() {
 			stale = append(stale, tbl)
 		} else {
 			estimated = append(estimated, tbl)
@@ -52,7 +52,7 @@ func PrintBloatSummary(tableBloat []analysis.BloatTable, indexBloat []analysis.B
 	fmt.Printf("  Tables analyzed           : %d\n", len(estimated))
 	fmt.Printf("  Tables with bloat         : %d (%.1f%%)\n", tablesWithBloat, withBloatPct)
 	if len(stale) > 0 {
-		fmt.Printf("  Not estimated (no stats)  : %d\n", len(stale))
+		fmt.Printf("  Not estimated             : %d\n", len(stale))
 	}
 	fmt.Println()
 	fmt.Printf("  Total database size       : %s\n", FormatSize(totalDBSize))
@@ -163,26 +163,42 @@ func PrintBloatSummary(tableBloat []analysis.BloatTable, indexBloat []analysis.B
 		fmt.Println()
 	}
 
-	// Tables that could not be estimated (stale/missing statistics)
+	// Tables that could not be estimated, with the reason and what to do.
 	if len(stale) > 0 {
 		sort.Slice(stale, func(i, j int) bool {
 			return stale[i].Schema+"."+stale[i].TableName < stale[j].Schema+"."+stale[j].TableName
 		})
-		fmt.Println(bold("NOT ESTIMATED") + " (stale statistics)")
+		fmt.Println(bold("NOT ESTIMATED"))
 		fmt.Println()
-		fmt.Printf("  %-40s %12s\n", "Table", "Size")
-		fmt.Println("  " + repeatString("-", 54))
+		fmt.Printf("  %-40s %12s  %s\n", "Table", "Size", "Reason")
+		fmt.Println("  " + repeatString("-", 78))
+		var anyStale, anyPrivilege bool
 		for _, tbl := range stale {
 			tableName := fmt.Sprintf("%s.%s", tbl.Schema, tbl.TableName)
 			if len(tableName) > 40 {
 				tableName = tableName[:37] + "..."
 			}
-			fmt.Printf("  %-40s %12s\n", tableName, FormatSize(tbl.TableSize))
+			fmt.Printf("  %-40s %12s  %s\n", tableName, FormatSize(tbl.TableSize), notEstimatedReason(tbl))
+			if tbl.Warning != "" {
+				anyPrivilege = true
+			} else {
+				anyStale = true
+			}
 		}
 		fmt.Println()
-		fmt.Println("  Statistics are stale or missing (never analyzed, or many dead")
-		fmt.Println("  tuples since the last VACUUM); their bloat cannot be estimated.")
-		fmt.Println("  Run VACUUM ANALYZE on them, then re-run qwash.")
+		if anyStale {
+			fmt.Println("  stale statistics: never analyzed, many changes since the last")
+			fmt.Println("  ANALYZE, or many dead tuples since the last VACUUM.")
+			fmt.Println("  Run VACUUM ANALYZE on them, then re-run qwash.")
+		}
+		if anyStale && anyPrivilege {
+			fmt.Println()
+		}
+		if anyPrivilege {
+			fmt.Println("  insufficient privilege: pg_stats hides the statistics of tables the")
+			fmt.Println("  role cannot SELECT. Connect as their owner, or grant SELECT")
+			fmt.Println("  (pg_read_all_data on PostgreSQL 14+).")
+		}
 		fmt.Println()
 	}
 
@@ -238,6 +254,14 @@ func bold(s string) string {
 	return "\033[1m" + s + "\033[0m"
 }
 
+// notEstimatedReason names why a table's bloat could not be estimated.
+func notEstimatedReason(tbl analysis.BloatTable) string {
+	if tbl.Warning != "" {
+		return tbl.Warning
+	}
+	return "stale statistics"
+}
+
 // PrintDetailedBloat displays detailed bloat information for specific tables
 // Used when -t is combined with --estimate
 func PrintDetailedBloat(tables []analysis.BloatTable) {
@@ -249,10 +273,14 @@ func PrintDetailedBloat(tables []analysis.BloatTable) {
 		tableName := fmt.Sprintf("%s.%s", tbl.Schema, tbl.TableName)
 		fmt.Println(tableName)
 		fmt.Println()
-		if tbl.StaleStats {
+		if tbl.NotEstimated() {
 			fmt.Printf("  Size        : %s\n", FormatSize(tbl.TableSize))
-			fmt.Printf("  Bloat       : not estimated (stale statistics)\n")
-			fmt.Printf("  Hint        : run VACUUM ANALYZE %s, then re-run qwash\n", tableName)
+			fmt.Printf("  Bloat       : not estimated (%s)\n", notEstimatedReason(tbl))
+			if tbl.Warning != "" {
+				fmt.Printf("  Hint        : connect as the owner of %s, or a role with SELECT on it\n", tableName)
+			} else {
+				fmt.Printf("  Hint        : run VACUUM ANALYZE %s, then re-run qwash\n", tableName)
+			}
 			fmt.Println()
 			if i < len(tables)-1 {
 				fmt.Println("  ---")
