@@ -537,7 +537,7 @@ go test ./tests -run TestEstimate -v
 
 ## License
 
-PostgreSQL License. See [LICENSE.md](LICENSE.md).
+PostgreSQL License. See [LICENSE](LICENSE).
 
 ## Contributing
 
